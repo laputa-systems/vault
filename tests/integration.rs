@@ -1,15 +1,3 @@
-// Integration tests that exercise the real vault binary.
-//
-// Most tests avoid touching the real macOS keychain: they test CLI argument
-// parsing, error messages for missing keys (which return errSecItemNotFound
-// without prompting), and exec mode with literal env vars.
-//
-// The two #[ignore]d tests (`set_reads_from_stdin_pipe` and
-// `set_creates_user_presence_item`) call `vault set`, which invokes SecItemAdd
-// and may trigger a macOS authentication prompt. Run them explicitly with:
-//
-//     cargo test -- --ignored
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -121,6 +109,13 @@ fn rm_too_few_args_errors() {
 #[test]
 fn ls_rejects_extra_args() {
     assert!(!vault(&["ls", "EXTRA"]).unwrap().status.success());
+}
+
+#[test]
+fn lock_rejects_extra_args() {
+    let out = vault(&["lock", "EXTRA"]).unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("lock takes no arguments"));
 }
 
 /// This test writes to the real macOS keychain and may trigger authentication.
@@ -280,4 +275,47 @@ fn set_creates_user_presence_item() {
 
     // Clean up
     vault(&["rm", name]).unwrap();
+}
+
+#[test]
+#[ignore = "requires macOS Keychain authorization"]
+fn lock_preserves_stored_secret() {
+    let name = "VAULT_TEST_LOCK_PRESERVES_SECRET";
+    let set = vault_stdin(&["set", name], "lock-test-value").unwrap();
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let locked = vault(&["lock"]).unwrap();
+    let listed = vault(&["ls"]).unwrap();
+    let retrieved = vault(&["get", name]).unwrap();
+    let removed = vault(&["rm", name]).unwrap();
+
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    assert!(String::from_utf8_lossy(&locked.stdout).contains("locked vault secrets"));
+    assert!(
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .any(|listed_name| listed_name == name)
+    );
+    assert!(
+        retrieved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retrieved.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&retrieved.stdout).trim(),
+        "lock-test-value"
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
 }

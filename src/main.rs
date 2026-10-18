@@ -38,6 +38,7 @@ Usage:
   vault get   <NAME>            Print a secret to stdout
   vault rm    <NAME>            Delete a secret
   vault ls                      List all stored secret names
+  vault lock                    Reset authorization for every secret
   vault purge                   Delete every secret vault manages
 
   vault [ENV ...] -- <CMD> [ARGS ...]   Run CMD with secrets injected
@@ -70,6 +71,7 @@ fn main() {
         "get" => cmd_get(&args),
         "rm" => cmd_rm(&args),
         "ls" => cmd_ls(&args),
+        "lock" => cmd_lock(&args),
         "purge" => cmd_purge(),
         "-h" | "--help" | "help" => write_fd(STDOUT, USAGE.as_bytes()),
         _ => exec_mode(&args[1..]),
@@ -162,6 +164,16 @@ fn cmd_purge() {
     }
 }
 
+fn cmd_lock(args: &[String]) {
+    if args.len() != 2 {
+        fail("vault: lock takes no arguments");
+    }
+    if let Err(e) = keychain::lock_secrets() {
+        fail(&e);
+    }
+    write_line(STDOUT, "locked vault secrets");
+}
+
 fn exec_mode(args: &[String]) {
     let dash_pos = args.iter().position(|a| a == "--");
 
@@ -247,39 +259,33 @@ fn read_all() -> Result<Vec<u8>, ()> {
     }
 }
 
-fn read_line() -> Result<String, ()> {
+fn read_line() -> Result<Vec<u8>, ()> {
     let mut bytes = Vec::new();
     loop {
         match read_byte()? {
             Some(b'\n') | Some(b'\r') | None => {
-                return String::from_utf8(bytes).map_err(|_| ());
+                return Ok(bytes);
             }
             Some(byte) => bytes.push(byte),
         }
     }
 }
 
-/// Read a secret from the terminal with echo disabled. Prints `*` for each
-/// character typed so the user has visual feedback (unless `silent` is true,
-/// for `isset`).
 fn read_without_echo(silent: bool) -> String {
     use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
 
     let stdin = io::stdin();
 
     let Ok(original) = tcgetattr(&stdin) else {
-        return read_line().unwrap_or_else(|_| fail("vault: failed to read input"));
+        let bytes = read_line().unwrap_or_else(|_| fail("vault: failed to read input"));
+        return decode_terminal_input(bytes)
+            .unwrap_or_else(|_| fail("vault: failed to read input: invalid UTF-8"));
     };
 
-    // Disable echo and canonical (line-buffered) mode so we can read one
-    // byte at a time and print feedback characters. ISIG is left enabled so
-    // Ctrl-C still delivers SIGINT.
     let mut termios = original.clone();
     termios.local_modes &= !(LocalModes::ECHO | LocalModes::ECHONL | LocalModes::ICANON);
     let _ = tcsetattr(&stdin, OptionalActions::Now, &termios);
 
-    // Restore terminal on drop — works for panics and early returns.
-    // Scoped so terminal is always restored before any process exit.
     struct Restore(io::Stdin, rustix::termios::Termios);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -287,7 +293,7 @@ fn read_without_echo(silent: bool) -> String {
         }
     }
 
-    let mut value = String::new();
+    let mut value = Vec::new();
     let mut read_error = false;
     {
         let _restore = Restore(stdin, original);
@@ -303,18 +309,12 @@ fn read_without_echo(silent: bool) -> String {
             match byte {
                 b'\n' | b'\r' => break,
                 0x7f => {
-                    // Backspace (DEL). Remove last character from both the
-                    // stored value and the on-screen feedback.
                     if value.pop().is_some() && !silent {
-                        // "\x08 \x08" = backspace, space, backspace
                         write_fd(STDERR, b"\x08 \x08");
                     }
                 }
                 byte => {
-                    // Any other byte is appended verbatim. For display we
-                    // print a single '*' regardless of the byte width
-                    // (multibyte UTF-8 sequences each produce one '*').
-                    value.push(byte as char);
+                    value.push(byte);
                     if !silent {
                         write_fd(STDERR, b"*");
                     }
@@ -327,12 +327,16 @@ fn read_without_echo(silent: bool) -> String {
         fail("vault: failed to read input");
     }
 
-    // Newline after the last '*' so the prompt doesn't collide with output.
     if !silent {
         write_fd(STDERR, b"\n");
     }
 
-    value
+    decode_terminal_input(value)
+        .unwrap_or_else(|_| fail("vault: failed to read input: invalid UTF-8"))
+}
+
+fn decode_terminal_input(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
+    String::from_utf8(bytes)
 }
 
 fn strip_trailing_newline(s: &mut String) {
@@ -407,4 +411,22 @@ fn spawn_and_exit(cmd_args: &[String], env: &[(String, String)]) -> ! {
         (status >> 8) & 0xff
     };
     unsafe { exit(exit_status) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_terminal_input;
+
+    #[test]
+    fn terminal_input_preserves_utf8() {
+        assert_eq!(
+            decode_terminal_input("café 🚀".as_bytes().to_vec()).unwrap(),
+            "café 🚀"
+        );
+    }
+
+    #[test]
+    fn terminal_input_rejects_invalid_utf8() {
+        assert!(decode_terminal_input(vec![0xC3, 0x28]).is_err());
+    }
 }

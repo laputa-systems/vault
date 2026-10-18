@@ -87,6 +87,14 @@ vault ls
 
 Names only, never values.
 
+### Reset authorization
+
+```bash
+vault lock
+```
+
+Resets the application partition authorization for every protected secret without deleting the values. macOS may ask once for the login Keychain password. The next access can ask for `vault` authorization again. This does not lock the login Keychain. Use `vault purge` to delete the secrets.
+
 ### Run a command with secrets
 
 ```bash
