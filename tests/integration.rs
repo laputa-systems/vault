@@ -118,8 +118,6 @@ fn lock_rejects_extra_args() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("lock takes no arguments"));
 }
 
-/// This test writes to the real macOS keychain and may trigger authentication.
-/// Only run with `--ignored`.
 #[test]
 #[ignore = "requires macOS keychain authentication"]
 fn set_reads_from_stdin_pipe() {
@@ -206,12 +204,8 @@ fn exec_exits_with_child_exit_code() {
 
 #[test]
 fn exec_child_killed_by_signal_exits_128_plus_signal() {
-    // SIGTERM = 15, so vault should exit 128 + 15 = 143
     let out = vault(&["--", "sh", "-c", "kill -TERM $$"]).unwrap();
     let code = out.status.code();
-    // The child is killed by SIGTERM; vault exits 128+15=143.
-    // Some shells or environments may not deliver signals the same way,
-    // so allow either None (signal) or 143 (our 128+sig convention).
     assert!(
         code == Some(143) || code.is_none(),
         "expected Some(143) or None (signal), got {code:?}"
@@ -231,18 +225,11 @@ fn exec_preserves_stderr() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("err-to-stderr"));
 }
 
-/// Regression: items created by `vault set` must use the protected service
-/// namespace. The value itself is guarded by user presence through the
-/// `kSecAccessControlUserPresence` policy in `keychain.rs`.
-///
-/// Gated because SecItemAdd may trigger a macOS authentication prompt. Run
-/// with `cargo test -- --ignored`.
 #[test]
 #[ignore = "requires macOS keychain authentication"]
 fn set_creates_user_presence_item() {
     let name = "VAULT_TEST_USER_PRESENCE_REGRESSION";
 
-    // Set a secret via stdin pipe
     let out = vault_stdin(&["set", name], "acl-test-value").unwrap();
     assert!(
         out.status.success(),
@@ -250,18 +237,15 @@ fn set_creates_user_presence_item() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Verify the item is in the protected service namespace.
     let dump = std::process::Command::new("security")
         .args(["dump-keychain", "-a"])
         .output()
         .expect("failed to run security dump-keychain");
     let dump_str = String::from_utf8_lossy(&dump.stdout);
 
-    // Find the section for our item and verify the service.
     let after_acct = match dump_str.find(&format!("\"acct\"<blob>=\"{name}\"")) {
         Some(pos) => &dump_str[pos..],
         None => {
-            // Clean up and fail
             let _ = vault(&["rm", name]);
             panic!("item not found in keychain dump");
         }
@@ -273,7 +257,6 @@ fn set_creates_user_presence_item() {
         "item is not in the protected service namespace:\n{item_section}"
     );
 
-    // Clean up
     vault(&["rm", name]).unwrap();
 }
 

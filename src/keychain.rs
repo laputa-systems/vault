@@ -51,7 +51,6 @@ mod imp {
         };
     }
 
-    /// Build a query dict for matching a vault item by service + account.
     fn query_dict(
         service: &str,
         name: &str,
@@ -124,7 +123,6 @@ mod imp {
     }
 
     pub fn set(service: &str, name: &str, value: &[u8]) -> Result<(), String> {
-        // Try update first — one call for the common "change a secret" case.
         let query = query_dict(service, name);
 
         let update_pairs: Vec<(CFString, core_foundation::base::CFType)> = vec![(
@@ -280,9 +278,6 @@ mod imp {
     }
 }
 
-// In-memory test store. Keeps unit tests fast and free of macOS keychain
-// approval prompts. The integration tests in tests/ cover the real keychain
-// path (gated behind #[ignore]).
 #[cfg(test)]
 #[allow(clippy::disallowed_types)]
 mod imp {
@@ -505,7 +500,6 @@ mod tests {
     #[test]
     fn purge_removes_all_for_service() {
         let _guard = test_guard();
-        // Clean up from any previous run, then add three items.
         for name in list_secrets().unwrap() {
             if name.starts_with("TEST_P") {
                 delete_secret(&name).unwrap();

@@ -22,6 +22,5 @@ panic = "abort"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
-# we're an exec wrapper; be as small as possible
 opt-level = 2
 strip = true

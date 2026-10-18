@@ -191,7 +191,6 @@ fn exec_mode(args: &[String]) {
 
     let mut env = Vec::with_capacity(env_specs.len());
     for spec in env_specs {
-        // Exactly one '=' not at position 0 → literal NAME=VALUE.
         if let Some((name, value)) = spec.split_once('=')
             && !name.is_empty()
             && !value.contains('=')
@@ -348,8 +347,6 @@ fn strip_trailing_newline(s: &mut String) {
     }
 }
 
-/// Spawn `cmd` and exit this process with the child's exit status.
-/// If the child was killed by a signal, exits with 128 + signal number.
 fn spawn_and_exit(cmd_args: &[String], env: &[(String, String)]) -> ! {
     let c_args: Vec<CString> = cmd_args
         .iter()
