@@ -32,8 +32,13 @@ Examples:
 ";
 
 static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
+#[cfg(target_os = "linux")]
+const SIG_TSTP: i32 = 20;
+#[cfg(target_os = "macos")]
+const SIG_TSTP: i32 = 18;
 
 unsafe extern "C" {
+    fn raise(signal: i32) -> i32;
     fn signal(signal: i32, handler: usize) -> usize;
     fn siginterrupt(signal: i32, interrupt: i32) -> i32;
 }
@@ -70,6 +75,7 @@ enum CliError {
         restore: Option<io::Error>,
     },
     SignalRestore(io::Error),
+    SignalSuspend(io::Error),
     InvalidUtf8,
     Interrupted(i32),
 }
@@ -114,6 +120,9 @@ impl fmt::Display for CliError {
             Self::SignalRestore(source) => {
                 write!(f, "vault: failed to restore signal handlers: {source}")
             }
+            Self::SignalSuspend(source) => {
+                write!(f, "vault: failed to suspend for terminal job control: {source}")
+            }
             Self::InvalidUtf8 => f.write_str("vault: failed to read input: invalid UTF-8"),
             Self::Interrupted(_) => f.write_str("vault: input interrupted"),
         }
@@ -125,7 +134,8 @@ impl std::error::Error for CliError {
         match self {
             Self::Io { source, .. }
             | Self::Spawn(source)
-            | Self::SignalRestore(source) => Some(source),
+            | Self::SignalRestore(source)
+            | Self::SignalSuspend(source) => Some(source),
             Self::Wait { source, .. } => Some(source),
             Self::TerminalSettings { source, .. } => Some(source),
             Self::TerminalReadAndRestore { read, .. } => Some(read),
@@ -387,10 +397,18 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
                 let signal = PENDING_SIGNAL.load(Ordering::Relaxed);
                 (signal != 0).then_some(signal)
             },
+            || signals.suspend_and_resume(),
         );
+        if read_result.is_ok() && PENDING_SIGNAL.load(Ordering::Relaxed) == SIG_TSTP {
+            signals.suspend_and_resume()?;
+        }
         let signal_restore = signals.restore();
         if let Err(source) = signal_restore {
             return Err(CliError::SignalRestore(source));
+        }
+        if PENDING_SIGNAL.load(Ordering::Relaxed) == SIG_TSTP {
+            signals.suspend_and_resume()?;
+            signals.restore().map_err(CliError::SignalRestore)?;
         }
         let value = read_result?;
         let signal = PENDING_SIGNAL.load(Ordering::Relaxed);
@@ -413,39 +431,65 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
     }
 }
 
-fn read_without_echo<R, W, T, I>(
+#[derive(Clone, Copy)]
+enum TerminalRead {
+    Complete,
+    Suspended,
+}
+
+fn read_without_echo<R, W, T, I, S>(
     input: &mut R,
     feedback: &mut W,
     silent: bool,
     terminal: &mut T,
     mut interrupted: I,
+    mut suspend: S,
 ) -> Result<String, CliError>
 where
     R: Read,
     W: Write,
     T: TerminalSettings,
     I: FnMut() -> Option<i32>,
+    S: FnMut() -> Result<(), CliError>,
 {
-    let mut session = TerminalSession::enter(terminal)?;
-    let read_result = read_terminal_line(input, feedback, silent, &mut interrupted);
-    let restore_result = session
-        .restore()
-        .map_err(|source| CliError::TerminalSettings {
-            operation: "restore settings",
-            source,
-            restore: None,
-        });
-    let bytes = match (read_result, restore_result) {
-        (Ok(bytes), Ok(())) => bytes,
-        (Err(error), Ok(())) => return Err(error),
-        (Ok(_), Err(error)) => return Err(error),
-        (Err(read), Err(restore)) => {
-            return Err(CliError::TerminalReadAndRestore {
-                read: Box::new(read),
-                restore: Box::new(restore),
+    let mut value = Vec::new();
+    loop {
+        let mut session = TerminalSession::enter(terminal)?;
+        let read_result = read_terminal_line(
+            input,
+            feedback,
+            silent,
+            &mut value,
+            &mut interrupted,
+        );
+        let restore_result = session
+            .restore()
+            .map_err(|source| CliError::TerminalSettings {
+                operation: "restore settings",
+                source,
+                restore: None,
             });
+        let state = match (read_result, restore_result) {
+            (Ok(state), Ok(())) => state,
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+            (Err(read), Err(restore)) => {
+                return Err(CliError::TerminalReadAndRestore {
+                    read: Box::new(read),
+                    restore: Box::new(restore),
+                });
+            }
+        };
+        match state {
+            TerminalRead::Complete => {
+                if interrupted() == Some(SIG_TSTP) {
+                    suspend()?;
+                }
+                break;
+            }
+            TerminalRead::Suspended => suspend()?,
         }
-    };
+    }
     if !silent {
         feedback.write_all(b"\n").map_err(|source| CliError::Io {
             operation: "write terminal feedback",
@@ -456,34 +500,34 @@ where
             source,
         })?;
     }
-    String::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)
+    String::from_utf8(value).map_err(|_| CliError::InvalidUtf8)
 }
 
 fn read_terminal_line<R, W, I>(
     input: &mut R,
     feedback: &mut W,
     silent: bool,
+    value: &mut Vec<u8>,
     interrupted: &mut I,
-) -> Result<Vec<u8>, CliError>
+) -> Result<TerminalRead, CliError>
 where
     R: Read,
     W: Write,
     I: FnMut() -> Option<i32>,
 {
-    let mut value = Vec::new();
     let mut byte = [0u8; 1];
     loop {
         if let Some(signal) = interrupted() {
+            if signal == SIG_TSTP {
+                return Ok(TerminalRead::Suspended);
+            }
             return Err(CliError::Interrupted(signal));
         }
         match input.read(&mut byte) {
-            Ok(0) => return Ok(value),
+            Ok(0) => return Ok(TerminalRead::Complete),
             Ok(_) => {
-                if let Some(signal) = interrupted() {
-                    return Err(CliError::Interrupted(signal));
-                }
                 match byte[0] {
-                    b'\n' | b'\r' => return Ok(value),
+                    b'\n' | b'\r' => return Ok(TerminalRead::Complete),
                     0x7f => {
                         if value.pop().is_some() && !silent {
                             feedback.write_all(b"\x08 \x08").map_err(|source| {
@@ -507,6 +551,9 @@ where
             }
             Err(source) if source.kind() == io::ErrorKind::Interrupted => {
                 if let Some(signal) = interrupted() {
+                    if signal == SIG_TSTP {
+                        return Ok(TerminalRead::Suspended);
+                    }
                     return Err(CliError::Interrupted(signal));
                 }
             }
@@ -608,7 +655,7 @@ impl SignalHandlers {
         let mut handlers = Self {
             previous: Vec::new(),
         };
-        for signal_number in [1, 2, 3, 15] {
+        for signal_number in [1, 2, 3, 15, SIG_TSTP] {
             let previous = unsafe {
                 signal(
                     signal_number,
@@ -628,6 +675,16 @@ impl SignalHandlers {
             }
         }
         Ok(handlers)
+    }
+
+    fn suspend_and_resume(&mut self) -> Result<(), CliError> {
+        self.restore().map_err(CliError::SignalRestore)?;
+        PENDING_SIGNAL.store(0, Ordering::Relaxed);
+        if unsafe { raise(SIG_TSTP) } != 0 {
+            return Err(CliError::SignalSuspend(io::Error::last_os_error()));
+        }
+        *self = Self::install()?;
+        Ok(())
     }
 
     fn restore(&mut self) -> io::Result<()> {
@@ -804,8 +861,15 @@ mod tests {
         let mut terminal = FakeTerminal::ready();
         let mut input = Cursor::new(b"secret\n".to_vec());
         let mut feedback = Vec::new();
-        let value = read_without_echo(&mut input, &mut feedback, true, &mut terminal, || None)
-            .unwrap();
+        let value = read_without_echo(
+            &mut input,
+            &mut feedback,
+            true,
+            &mut terminal,
+            || None,
+            || Ok(()),
+        )
+        .unwrap();
         assert_eq!(value, "secret");
         assert!(feedback.is_empty());
         assert!(terminal.echo_enabled);
@@ -816,8 +880,15 @@ mod tests {
     fn terminal_input_rejects_invalid_utf8_after_restoration() {
         let mut terminal = FakeTerminal::ready();
         let mut input = Cursor::new(vec![0xc3, 0x28, b'\n']);
-        let error = read_without_echo(&mut input, &mut Vec::new(), true, &mut terminal, || None)
-            .unwrap_err();
+        let error = read_without_echo(
+            &mut input,
+            &mut Vec::new(),
+            true,
+            &mut terminal,
+            || None,
+            || Ok(()),
+        )
+        .unwrap_err();
         assert!(matches!(error, CliError::InvalidUtf8));
         assert!(terminal.echo_enabled);
     }
@@ -832,6 +903,7 @@ mod tests {
             true,
             &mut get_failure,
             || None,
+            || Ok(()),
         )
         .unwrap_err();
         assert!(matches!(error, CliError::TerminalSettings { operation: "read settings", .. }));
@@ -845,6 +917,7 @@ mod tests {
             true,
             &mut set_failure,
             || None,
+            || Ok(()),
         )
         .unwrap_err();
         assert!(matches!(error, CliError::TerminalSettings { operation: "disable echo", .. }));
@@ -858,6 +931,7 @@ mod tests {
             true,
             &mut restore_failure,
             || None,
+            || Ok(()),
         )
         .unwrap_err();
         assert!(matches!(error, CliError::TerminalSettings { operation: "restore settings", .. }));
@@ -873,6 +947,7 @@ mod tests {
             true,
             &mut terminal,
             || None,
+            || Ok(()),
         )
         .unwrap_err();
         assert!(matches!(error, CliError::Io { operation: "read terminal input", .. }));
@@ -890,6 +965,7 @@ mod tests {
             true,
             &mut terminal,
             || None,
+            || Ok(()),
         )
         .unwrap_err();
         assert!(matches!(error, CliError::TerminalReadAndRestore { .. }));
@@ -902,6 +978,7 @@ mod tests {
             false,
             &mut terminal,
             || None,
+            || Ok(()),
         )
         .unwrap_err();
         let message = error.to_string();
@@ -918,6 +995,7 @@ mod tests {
             true,
             &mut terminal,
             || Some(2),
+            || Ok(()),
         )
         .unwrap_err();
         assert!(matches!(error, CliError::Interrupted(2)));

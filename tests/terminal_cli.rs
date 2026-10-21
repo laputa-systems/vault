@@ -5,6 +5,8 @@ mod unix_pty {
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::fd::FromRawFd;
+    use std::os::unix::process::ExitStatusExt;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -22,7 +24,17 @@ mod unix_pty {
 
     unsafe extern "C" {
         fn kill(process: c_int, signal: c_int) -> c_int;
+        fn signal(signal: c_int, handler: usize) -> usize;
+        fn waitpid(process: c_int, status: *mut c_int, options: c_int) -> c_int;
     }
+
+    #[cfg(target_os = "linux")]
+    const SIGTSTP: c_int = 20;
+    #[cfg(target_os = "macos")]
+    const SIGTSTP: c_int = 18;
+    const SIGCONT: c_int = 19;
+    const WNOHANG: c_int = 1;
+    const WUNTRACED: c_int = 2;
 
     fn open_pty() -> io::Result<(File, File)> {
         let mut master = -1;
@@ -61,6 +73,28 @@ mod unix_pty {
             .spawn()
     }
 
+    fn launch_isset_with_default_tstp(
+        slave: &File,
+    ) -> io::Result<std::process::Child> {
+        let executable = env!("CARGO_BIN_EXE_vault");
+        let mut command = Command::new(executable);
+        command
+            .args(["isset", "VAULT_TEST_TERMINAL_INPUT"])
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave.try_clone()?))
+            .process_group(0);
+        unsafe {
+            command.pre_exec(|| {
+                if signal(SIGTSTP, 0) == usize::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    }
+
     fn wait_for_hidden_echo(terminal: &File) -> io::Result<()> {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -78,6 +112,32 @@ mod unix_pty {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn wait_for_child_event(process: c_int) -> io::Result<Option<c_int>> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut status = 0;
+            let result = unsafe { waitpid(process, &mut status, WNOHANG | WUNTRACED) };
+            if result == process {
+                return Ok(Some(status));
+            }
+            if result == -1 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            thread::yield_now();
+        }
+    }
+
+    fn is_stopped(status: c_int) -> bool {
+        status & 0xff == 0x7f
     }
 
     fn read_terminal_output(mut master: File) -> io::Result<Vec<u8>> {
@@ -148,6 +208,58 @@ mod unix_pty {
         assert_eq!(status.code(), Some(130));
         let after = tcgetattr(&master).unwrap();
         let _ = output_reader.join().unwrap().unwrap();
-        assert_eq!(before.local_modes, after.local_modes);
+        assert_eq!(
+            before.local_modes & !LocalModes::PENDIN,
+            after.local_modes & !LocalModes::PENDIN
+        );
+    }
+
+    #[test]
+    fn terminal_suspend_restores_settings_until_resume_and_continues_input() {
+        let (mut master, slave) = open_pty().unwrap();
+        let before = tcgetattr(&slave).unwrap();
+        let output_reader = thread::spawn({
+            let reader = master.try_clone().unwrap();
+            move || read_terminal_output(reader)
+        });
+        let mut child = launch_isset_with_default_tstp(&slave).unwrap();
+        drop(slave);
+        wait_for_hidden_echo(&master).unwrap();
+        master.write_all(b"vault-suspend-secret").unwrap();
+        assert_eq!(unsafe { kill(child.id() as c_int, SIGTSTP) }, 0);
+
+        let event = wait_for_child_event(child.id() as c_int).unwrap();
+        let stopped = event.is_some_and(is_stopped);
+        let stopped_settings = tcgetattr(&master).ok();
+        let (final_status, resumed, resumed_in_silent_mode) =
+            if event.is_some_and(|status| !is_stopped(status)) {
+                let wait_result = child.wait();
+                assert!(wait_result.is_err(), "waitpid already reaped the child");
+                (std::process::ExitStatus::from_raw(event.unwrap()), false, false)
+            } else {
+                let resumed = unsafe { kill(child.id() as c_int, SIGCONT) } == 0;
+                let resumed_in_silent_mode = wait_for_hidden_echo(&master).is_ok();
+                let _ = master.write_all(b"-after-resume-\xff\n");
+                (child.wait().unwrap(), resumed, resumed_in_silent_mode)
+            };
+        let after = tcgetattr(&master).unwrap();
+        let output = output_reader.join().unwrap().unwrap();
+        assert!(stopped, "process did not stop for SIGTSTP: {event:?}");
+        assert!(resumed, "terminal reader did not resume after SIGCONT");
+        assert!(resumed_in_silent_mode, "terminal input did not resume silently");
+        let stopped_settings = stopped_settings.unwrap();
+        assert_eq!(
+            before.local_modes & !LocalModes::PENDIN,
+            stopped_settings.local_modes & !LocalModes::PENDIN
+        );
+        assert!(!final_status.success());
+        assert_eq!(
+            before.local_modes & !LocalModes::PENDIN,
+            after.local_modes & !LocalModes::PENDIN
+        );
+        assert!(!output
+            .windows(b"vault-suspend-secret".len())
+            .any(|window| window == b"vault-suspend-secret"));
+        assert!(String::from_utf8_lossy(&output).contains("invalid UTF-8"));
     }
 }
