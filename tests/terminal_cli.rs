@@ -8,8 +8,17 @@ mod unix_pty {
     use std::os::unix::process::ExitStatusExt;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+    #[cfg(target_os = "linux")]
+    use std::process::Child;
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(target_os = "linux")]
+    use std::sync::mpsc::{self, Receiver};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "linux")]
+    static NEXT_DATA_HOME: AtomicU64 = AtomicU64::new(0);
 
     #[link(name = "util")]
     unsafe extern "C" {
@@ -32,6 +41,9 @@ mod unix_pty {
     const SIGTSTP: c_int = 20;
     #[cfg(target_os = "macos")]
     const SIGTSTP: c_int = 18;
+    #[cfg(target_os = "linux")]
+    const SIGCONT: c_int = 18;
+    #[cfg(target_os = "macos")]
     const SIGCONT: c_int = 19;
     const WNOHANG: c_int = 1;
     const WUNTRACED: c_int = 2;
@@ -61,6 +73,146 @@ mod unix_pty {
         settings.input_modes &= !InputModes::ISTRIP;
         tcsetattr(&slave, OptionalActions::Now, &settings).map_err(io::Error::from)?;
         Ok((master, slave))
+    }
+
+    #[cfg(target_os = "linux")]
+    struct TestDataHome(std::path::PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl TestDataHome {
+        fn new() -> io::Result<Self> {
+            let path = std::env::temp_dir().join(format!(
+                "vault-cli-test-{}-{}",
+                std::process::id(),
+                NEXT_DATA_HOME.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for TestDataHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn launch_with_controlling_tty(
+        slave: &File,
+        data_home: &std::path::Path,
+        args: &[&str],
+        stdin: Stdio,
+    ) -> io::Result<Child> {
+        let executable = env!("CARGO_BIN_EXE_vault");
+        let mut command = Command::new(executable);
+        command
+            .args(args)
+            .env("XDG_DATA_HOME", data_home)
+            .stdin(stdin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(slave.try_clone()?));
+        unsafe {
+            // SAFETY: The pre-exec closure only creates a session and attaches the inherited terminal.
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(io::Error::from)?;
+                rustix::process::ioctl_tiocsctty(rustix::stdio::stderr())
+                    .map_err(io::Error::from)
+            });
+        }
+        command.spawn()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn launch_headless(
+        data_home: &std::path::Path,
+        args: &[&str],
+        stdin: Stdio,
+    ) -> io::Result<Child> {
+        let executable = env!("CARGO_BIN_EXE_vault");
+        let mut command = Command::new(executable);
+        command
+            .args(args)
+            .env("XDG_DATA_HOME", data_home)
+            .stdin(stdin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            // SAFETY: The pre-exec closure only starts a session without a controlling terminal.
+            command.pre_exec(|| rustix::process::setsid().map(|_| ()).map_err(io::Error::from));
+        }
+        command.spawn()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_terminal_chunks(mut reader: File, sender: mpsc::Sender<Vec<u8>>) {
+        let mut buffer = [0u8; 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(read) => {
+                    if sender.send(buffer[..read].to_vec()).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.raw_os_error() == Some(5) => return,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_prompt(
+        master: &mut File,
+        chunks: &Receiver<Vec<u8>>,
+        output: &mut Vec<u8>,
+        prompt: &str,
+        response: &str,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !output
+            .windows(prompt.len())
+            .any(|window| window == prompt.as_bytes())
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("terminal did not show {prompt:?}"),
+                ));
+            }
+            let chunk = chunks
+                .recv_timeout(remaining)
+                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+            output.extend_from_slice(&chunk);
+        }
+        master.write_all(response.as_bytes())?;
+        master.write_all(b"\n")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_terminal_output(
+        chunks: Receiver<Vec<u8>>,
+        mut output: Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
+        loop {
+            match chunks.recv_timeout(Duration::from_secs(5)) {
+                Ok(chunk) => output.extend_from_slice(&chunk),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(output),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "terminal output did not close",
+                    ));
+                }
+            }
+        }
     }
 
     fn launch_isset(slave: &File) -> io::Result<std::process::Child> {
@@ -261,5 +413,144 @@ mod unix_pty {
             .windows(b"vault-suspend-secret".len())
             .any(|window| window == b"vault-suspend-secret"));
         assert!(String::from_utf8_lossy(&output).contains("invalid UTF-8"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn controlling_tty_passphrase_is_independent_of_piped_secrets_and_exec_prompts_once() {
+        let data_home = TestDataHome::new().unwrap();
+        let (mut master, slave) = open_pty().unwrap();
+        let (sender, chunks) = mpsc::channel();
+        let reader_fd = master.try_clone().unwrap();
+        let reader = thread::spawn(move || read_terminal_chunks(reader_fd, sender));
+        let mut set = launch_with_controlling_tty(
+            &slave,
+            data_home.path(),
+            &["set", "TOKEN"],
+            Stdio::piped(),
+        )
+        .unwrap();
+        drop(slave);
+        set.stdin
+            .take()
+            .unwrap()
+            .write_all(b"pipe-secret")
+            .unwrap();
+        let passphrase = "test master passphrase";
+        let mut terminal_output = Vec::new();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut terminal_output,
+            "Create master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut terminal_output,
+            "Confirm master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
+        assert!(set.wait_with_output().unwrap().status.success());
+        drop(master);
+        let terminal_output = finish_terminal_output(chunks, terminal_output).unwrap();
+        reader.join().unwrap();
+        assert!(!terminal_output
+            .windows(passphrase.len())
+            .any(|window| window == passphrase.as_bytes()));
+        assert!(!terminal_output
+            .windows(b"pipe-secret".len())
+            .any(|window| window == b"pipe-secret"));
+
+        let mut second_set = launch_headless(
+            data_home.path(),
+            &["isset", "DATABASE_URL"],
+            Stdio::piped(),
+        )
+        .unwrap();
+        second_set
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"database-secret")
+            .unwrap();
+        assert!(second_set.wait_with_output().unwrap().status.success());
+
+        let headless_get = launch_headless(
+            data_home.path(),
+            &["get", "TOKEN"],
+            Stdio::null(),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+        assert!(!headless_get.status.success());
+        assert!(headless_get.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&headless_get.stderr)
+            .contains("controlling terminal is required"));
+
+        let (mut master, slave) = open_pty().unwrap();
+        let (sender, chunks) = mpsc::channel();
+        let reader_fd = master.try_clone().unwrap();
+        let reader = thread::spawn(move || read_terminal_chunks(reader_fd, sender));
+        let exec = launch_with_controlling_tty(
+            &slave,
+            data_home.path(),
+            &[
+                "TOKEN",
+                "DATABASE_URL",
+                "--",
+                "sh",
+                "-c",
+                "printf '%s:%s' \"$TOKEN\" \"$DATABASE_URL\"",
+            ],
+            Stdio::null(),
+        )
+        .unwrap();
+        drop(slave);
+        let mut exec_terminal_output = Vec::new();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut exec_terminal_output,
+            "Master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
+        let exec_output = exec.wait_with_output().unwrap();
+        assert!(exec_output.status.success());
+        assert_eq!(exec_output.stdout, b"pipe-secret:database-secret");
+        drop(master);
+        let exec_terminal_output = finish_terminal_output(chunks, exec_terminal_output).unwrap();
+        reader.join().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&exec_terminal_output)
+                .matches("Master passphrase: ")
+                .count(),
+            1
+        );
+        assert!(!exec_terminal_output
+            .windows(passphrase.len())
+            .any(|window| window == passphrase.as_bytes()));
+
+        let listed = launch_headless(data_home.path(), &["ls"], Stdio::null())
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        assert!(listed.status.success());
+        assert_eq!(listed.stdout, b"DATABASE_URL\nTOKEN\n");
+
+        let removed = launch_headless(
+            data_home.path(),
+            &["rm", "DATABASE_URL"],
+            Stdio::null(),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+        assert!(removed.status.success());
     }
 }

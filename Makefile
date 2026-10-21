@@ -3,13 +3,15 @@ TARGET := $(shell rustc -vV | awk '/^host:/ {print $$2}')
 PREFIX ?= $(HOME)/usr
 
 SIGN_ID ?= Vault Signing
+OS := $(shell uname -s)
 
 lint:
 	cargo fmt --all
 	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
 install: dist
-	codesign --sign "$(SIGN_ID)" --force --timestamp=none target/$(TARGET)/dist/$(NAME)
+	$(if $(filter Darwin,$(OS)),codesign --sign "$(SIGN_ID)" --force --timestamp=none target/$(TARGET)/dist/$(NAME),:)
+	mkdir -p $(PREFIX)/bin
 	cp target/$(TARGET)/dist/$(NAME) $(PREFIX)/bin/$(NAME)
 
 dist:

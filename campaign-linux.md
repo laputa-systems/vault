@@ -12,6 +12,10 @@ This is an implementation campaign, not a design exercise. Inspect the current r
 
 Work autonomously. Make sound engineering decisions without stopping for approval. Prefer the simplest correct implementation, but never sacrifice security or data integrity for brevity.
 
+## Current checkpoint
+
+The Linux age backend, documentation, installation, and release matrix are implemented. Local Linux tests, Clippy, Alpine musl release build/install, and Linux GNU plus macOS compile checks pass. macOS runtime verification and an external `rage` CLI interoperability check were unavailable on this host. Same-user write access can replace the public recipient and redirect passphrase-free `set`; this boundary is documented.
+
 ## 1. Nonnegotiable principles
 
 - Rust only. Use the `age` crate directly, not the Go `age` executable or an external `rage` process.

@@ -1,12 +1,30 @@
 use rustix::termios::{LocalModes, OptionalActions, Termios, tcgetattr, tcsetattr};
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
-use vault::keychain;
+
+#[cfg(target_os = "macos")]
+use vault::keychain as storage;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+use crate::linux as storage;
+
+#[cfg(target_os = "linux")]
+use age::secrecy::SecretString;
+
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
+
+#[cfg(target_os = "linux")]
+use zeroize::Zeroize;
 
 const USAGE: &str = "\
-vault — macOS Keychain secret manager
+  vault — secret manager
 
 Usage:
 
@@ -21,7 +39,7 @@ Usage:
 
 Environment specifications before -- may be:
 
-  KEY                          Look up KEY in the Keychain
+  KEY                          Look up KEY in the vault
   KEY=VALUE                    Pass literal KEY=VALUE
 
 Examples:
@@ -50,7 +68,7 @@ extern "C" fn remember_signal(signal: i32) {
 #[derive(Debug)]
 enum CliError {
     InvalidInput(String),
-    Keychain(String),
+    Storage(String),
     Io {
         operation: &'static str,
         source: io::Error,
@@ -70,6 +88,11 @@ enum CliError {
         read: Box<CliError>,
         restore: Box<CliError>,
     },
+    #[cfg(target_os = "linux")]
+    TerminalReadAndPromptOutput {
+        read: Box<CliError>,
+        output: io::Error,
+    },
     SignalSetup {
         source: io::Error,
         restore: Option<io::Error>,
@@ -83,7 +106,7 @@ enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidInput(message) | Self::Keychain(message) => f.write_str(message),
+            Self::InvalidInput(message) | Self::Storage(message) => f.write_str(message),
             Self::Io { operation, source } => write!(f, "vault: {operation} failed: {source}"),
             Self::Spawn(source) => write!(f, "vault: failed to spawn command: {source}"),
             Self::Wait { source, kill, reap } => {
@@ -109,6 +132,10 @@ impl fmt::Display for CliError {
             }
             Self::TerminalReadAndRestore { read, restore } => {
                 write!(f, "vault: {read}; terminal restoration also failed: {restore}")
+            }
+            #[cfg(target_os = "linux")]
+            Self::TerminalReadAndPromptOutput { read, output } => {
+                write!(f, "vault: {read}; passphrase prompt output also failed: {output}")
             }
             Self::SignalSetup { source, restore } => {
                 write!(f, "vault: failed to prepare interrupt handling: {source}")?;
@@ -139,9 +166,11 @@ impl std::error::Error for CliError {
             Self::Wait { source, .. } => Some(source),
             Self::TerminalSettings { source, .. } => Some(source),
             Self::TerminalReadAndRestore { read, .. } => Some(read),
+            #[cfg(target_os = "linux")]
+            Self::TerminalReadAndPromptOutput { read, .. } => Some(read),
             Self::SignalSetup { source, .. } => Some(source),
             Self::InvalidInput(_)
-            | Self::Keychain(_)
+            | Self::Storage(_)
             | Self::InvalidUtf8
             | Self::Interrupted(_) => None,
         }
@@ -243,7 +272,17 @@ fn require_exact_name<'a>(args: &'a [String], cmd: &str) -> Result<&'a str, CliE
 fn cmd_set(args: &[String], silent: bool) -> Result<(), CliError> {
     let name = require_exact_name(args, if silent { "isset" } else { "set" })?;
     let value = read_secret(name, silent)?;
-    persist_secret(name, Ok(value), keychain::set_secret)
+    persist_secret(name, Ok(value), store_secret)
+}
+
+#[cfg(target_os = "macos")]
+fn store_secret(name: &str, value: &[u8]) -> Result<(), String> {
+    storage::set_secret(name, value)
+}
+
+#[cfg(target_os = "linux")]
+fn store_secret(name: &str, value: &[u8]) -> Result<(), String> {
+    storage::set_secret(name, value, prompt_master_passphrase)
 }
 
 fn persist_secret(
@@ -252,24 +291,45 @@ fn persist_secret(
     store: impl FnOnce(&str, &[u8]) -> Result<(), String>,
 ) -> Result<(), CliError> {
     let value = read_value?;
-    store(name, value.as_bytes()).map_err(CliError::Keychain)
+    let result = store(name, value.as_bytes());
+    #[cfg(target_os = "linux")]
+    {
+        let mut value = value;
+        value.zeroize();
+    }
+    result.map_err(CliError::Storage)
 }
 
 fn cmd_get(args: &[String]) -> Result<(), CliError> {
     let name = require_exact_name(args, "get")?;
-    let value = keychain::get_secret(name).map_err(CliError::Keychain)?;
-    write_stdout(value.as_bytes())?;
-    write_stdout(b"\n")
+    let value = get_secret(name)?;
+    let result = write_stdout(value.as_bytes()).and_then(|()| write_stdout(b"\n"));
+    #[cfg(target_os = "linux")]
+    {
+        let mut value = value;
+        value.zeroize();
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn get_secret(name: &str) -> Result<String, CliError> {
+    storage::get_secret(name).map_err(CliError::Storage)
+}
+
+#[cfg(target_os = "linux")]
+fn get_secret(name: &str) -> Result<String, CliError> {
+    storage::get_secret(name, prompt_master_passphrase).map_err(CliError::Storage)
 }
 
 fn cmd_rm(args: &[String]) -> Result<(), CliError> {
     let name = require_exact_name(args, "rm")?;
-    keychain::delete_secret(name).map_err(CliError::Keychain)
+    storage::delete_secret(name).map_err(CliError::Storage)
 }
 
 fn cmd_ls(args: &[String]) -> Result<(), CliError> {
     require_no_args(args, "ls")?;
-    for name in keychain::list_secrets().map_err(CliError::Keychain)? {
+    for name in storage::list_secrets().map_err(CliError::Storage)? {
         write_stdout(name.as_bytes())?;
         write_stdout(b"\n")?;
     }
@@ -277,7 +337,7 @@ fn cmd_ls(args: &[String]) -> Result<(), CliError> {
 }
 
 fn cmd_purge(args: &[String]) -> Result<(), CliError> {
-    cmd_purge_with(args, keychain::purge_secrets)
+    cmd_purge_with(args, storage::purge_secrets)
 }
 
 fn cmd_purge_with(
@@ -285,7 +345,7 @@ fn cmd_purge_with(
     purge: impl FnOnce() -> Result<usize, String>,
 ) -> Result<(), CliError> {
     require_no_args(args, "purge")?;
-    match purge().map_err(CliError::Keychain)? {
+    match purge().map_err(CliError::Storage)? {
         0 => write_stdout(b"nothing to purge\n"),
         count => write_stdout(
             format!("purged {count} secret{}\n", if count == 1 { "" } else { "s" }).as_bytes(),
@@ -305,7 +365,7 @@ fn require_no_args(args: &[String], cmd: &str) -> Result<(), CliError> {
 
 enum EnvSpec<'a> {
     Literal { name: &'a str, value: &'a str },
-    Keychain(&'a str),
+    Secret(&'a str),
 }
 
 fn parse_env_spec(spec: &str) -> EnvSpec<'_> {
@@ -315,7 +375,33 @@ fn parse_env_spec(spec: &str) -> EnvSpec<'_> {
     {
         return EnvSpec::Literal { name, value };
     }
-    EnvSpec::Keychain(spec)
+    EnvSpec::Secret(spec)
+}
+
+enum ExecEnv<'a> {
+    Literal(String, String),
+    Secret(&'a str),
+}
+
+#[cfg(target_os = "macos")]
+fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
+    names
+        .iter()
+        .map(|name| storage::get_secret(name).map_err(CliError::Storage))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    storage::get_secrets(names, prompt_master_passphrase).map_err(CliError::Storage)
+}
+
+#[cfg(target_os = "linux")]
+fn prompt_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretString, String> {
+    read_master_passphrase(prompt).map_err(|error| error.to_string())
 }
 
 fn parse_exec_args(args: &[String]) -> Result<(&[String], &[String]), CliError> {
@@ -336,24 +422,34 @@ fn parse_exec_args(args: &[String]) -> Result<(&[String], &[String]), CliError> 
 
 fn exec_mode(args: &[String]) -> Result<ExitCode, CliError> {
     let (specs, cmd_args) = parse_exec_args(args)?;
-    let mut environment = Vec::with_capacity(specs.len());
+    let mut resolved_specs = Vec::with_capacity(specs.len());
+    let mut names = Vec::new();
     for spec in specs {
         match parse_env_spec(spec) {
             EnvSpec::Literal { name, value } => {
-                environment.push((name.to_owned(), value.to_owned()));
+                resolved_specs.push(ExecEnv::Literal(name.to_owned(), value.to_owned()));
             }
-            EnvSpec::Keychain(name) => {
-                let value = keychain::get_secret(name).map_err(CliError::Keychain)?;
-                environment.push((name.to_owned(), value));
+            EnvSpec::Secret(name) => {
+                names.push(name);
+                resolved_specs.push(ExecEnv::Secret(name));
             }
         }
     }
-    run_child(cmd_args, &environment)
+
+    let mut values = get_secrets(&names)?.into_iter();
+    let mut environment: Vec<_> = resolved_specs
+        .into_iter()
+        .map(|spec| match spec {
+            ExecEnv::Literal(name, value) => (name, value),
+            ExecEnv::Secret(name) => (name.to_owned(), values.next().expect("resolved secret")),
+        })
+        .collect();
+    run_child(cmd_args, &mut environment)
 }
 
 fn run_child(
     cmd_args: &[String],
-    environment: &[(String, String)],
+    environment: &mut [(String, String)],
 ) -> Result<ExitCode, CliError> {
     let mut command = Command::new(&cmd_args[0]);
     command
@@ -363,7 +459,13 @@ fn run_child(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let mut child = command.spawn().map_err(CliError::Spawn)?;
+    let spawn_result = command.spawn();
+    drop(command);
+    #[cfg(target_os = "linux")]
+    for (_, value) in environment {
+        value.zeroize();
+    }
+    let mut child = spawn_result.map_err(CliError::Spawn)?;
     match child.wait() {
         Ok(status) => {
             #[cfg(unix)]
@@ -387,7 +489,7 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
             write_stderr(format!("Enter value for {name}: ").as_bytes())?;
         }
         let mut signals = SignalHandlers::install()?;
-        let mut terminal = StdinTerminal { stdin: &stdin };
+        let mut terminal = TerminalFd { fd: &stdin };
         let read_result = read_without_echo(
             &mut stdin.lock(),
             &mut io::stderr().lock(),
@@ -429,6 +531,85 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
         strip_trailing_newline(&mut value);
         Ok(value)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretString, CliError> {
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| {
+            CliError::InvalidInput(
+                "vault: a controlling terminal is required to enter the master passphrase"
+                    .to_owned(),
+            )
+        })?;
+    if !rustix::termios::isatty(&tty) {
+        return Err(CliError::InvalidInput(
+            "vault: a controlling terminal is required to enter the master passphrase".to_owned(),
+        ));
+    }
+
+    let mut output = tty.try_clone().map_err(|source| CliError::Io {
+        operation: "open controlling terminal for passphrase prompt",
+        source,
+    })?;
+    output
+        .write_all(prompt.prompt().as_bytes())
+        .and_then(|()| output.flush())
+        .map_err(|source| CliError::Io {
+            operation: "write passphrase prompt",
+            source,
+        })?;
+
+    let terminal_fd = tty.try_clone().map_err(|source| CliError::Io {
+        operation: "open controlling terminal for terminal settings",
+        source,
+    })?;
+    let mut signals = SignalHandlers::install()?;
+    let mut terminal = TerminalFd { fd: &terminal_fd };
+    let read_result = read_without_echo(
+        &mut tty,
+        &mut output,
+        true,
+        &mut terminal,
+        || {
+            let signal = PENDING_SIGNAL.load(Ordering::Relaxed);
+            (signal != 0).then_some(signal)
+        },
+        || signals.suspend_and_resume(),
+    );
+    let signal_restore = signals.restore();
+    let newline_result = output.write_all(b"\n").and_then(|()| output.flush());
+    if let Err(source) = signal_restore {
+        return Err(CliError::SignalRestore(source));
+    }
+    if PENDING_SIGNAL.load(Ordering::Relaxed) == SIG_TSTP {
+        signals.suspend_and_resume()?;
+        signals.restore().map_err(CliError::SignalRestore)?;
+    }
+    let pending_signal = PENDING_SIGNAL.load(Ordering::Relaxed);
+    if pending_signal != 0 {
+        return Err(CliError::Interrupted(pending_signal));
+    }
+    let value = match (read_result, newline_result) {
+        (Ok(value), Ok(())) => value,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(source)) => {
+            return Err(CliError::Io {
+                operation: "write passphrase prompt",
+                source,
+            });
+        }
+        (Err(read), Err(source)) => {
+            return Err(CliError::TerminalReadAndPromptOutput {
+                read: Box::new(read),
+                output: source,
+            });
+        }
+    };
+    Ok(SecretString::from(value))
 }
 
 #[derive(Clone, Copy)]
@@ -575,25 +756,25 @@ trait TerminalSettings {
     fn restore(&mut self, saved: &Self::Saved) -> io::Result<()>;
 }
 
-struct StdinTerminal<'a> {
-    stdin: &'a io::Stdin,
+struct TerminalFd<'a, Fd: AsFd> {
+    fd: &'a Fd,
 }
 
-impl TerminalSettings for StdinTerminal<'_> {
+impl<Fd: AsFd> TerminalSettings for TerminalFd<'_, Fd> {
     type Saved = Termios;
 
     fn snapshot(&mut self) -> io::Result<Self::Saved> {
-        tcgetattr(self.stdin).map_err(io::Error::from)
+        tcgetattr(self.fd).map_err(io::Error::from)
     }
 
     fn disable_echo(&mut self, saved: &Self::Saved) -> io::Result<()> {
         let mut hidden = saved.clone();
         hidden.local_modes &= !(LocalModes::ECHO | LocalModes::ECHONL | LocalModes::ICANON);
-        tcsetattr(self.stdin, OptionalActions::Now, &hidden).map_err(io::Error::from)
+        tcsetattr(self.fd, OptionalActions::Now, &hidden).map_err(io::Error::from)
     }
 
     fn restore(&mut self, saved: &Self::Saved) -> io::Result<()> {
-        tcsetattr(self.stdin, OptionalActions::Now, saved).map_err(io::Error::from)
+        tcsetattr(self.fd, OptionalActions::Now, saved).map_err(io::Error::from)
     }
 }
 
@@ -810,9 +991,9 @@ mod tests {
                 value: ""
             }
         ));
-        assert!(matches!(parse_env_spec("=VALUE"), EnvSpec::Keychain("=VALUE")));
-        assert!(matches!(parse_env_spec("A=B=C"), EnvSpec::Keychain("A=B=C")));
-        assert!(matches!(parse_env_spec("NAME"), EnvSpec::Keychain("NAME")));
+        assert!(matches!(parse_env_spec("=VALUE"), EnvSpec::Secret("=VALUE")));
+        assert!(matches!(parse_env_spec("A=B=C"), EnvSpec::Secret("A=B=C")));
+        assert!(matches!(parse_env_spec("NAME"), EnvSpec::Secret("NAME")));
     }
 
     #[test]
@@ -851,8 +1032,8 @@ mod tests {
             "-c".to_owned(),
             format!("test \"${name}\" = child-value"),
         ];
-        let environment = [(name.to_owned(), "child-value".to_owned())];
-        assert_eq!(run_child(&args, &environment).unwrap(), std::process::ExitCode::SUCCESS);
+        let mut environment = [(name.to_owned(), "child-value".to_owned())];
+        assert_eq!(run_child(&args, &mut environment).unwrap(), std::process::ExitCode::SUCCESS);
         assert_eq!(std::env::var_os(name), before);
     }
 

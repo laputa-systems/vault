@@ -8,7 +8,17 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     defaults:
       run:
@@ -31,8 +41,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: vault-aarch64-apple-darwin
-          path: target/aarch64-apple-darwin/dist/vault
+          name: vault-${{ matrix.target }}
+          path: target/${{ matrix.target }}/dist/vault
 
   release:
     name: Create release
@@ -42,6 +52,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
 
+      - name: Name release assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          V="${VERSION#release/}"
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            mv "vault-${target}/vault" "vault-${V}-${target}"
+          done
+
       - name: Create GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,5 +68,4 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           V="${VERSION#release/}"
-          mv vault-aarch64-apple-darwin/vault "vault-${V}-aarch64-apple-darwin"
-          gh release create "$VERSION" "vault-${V}-aarch64-apple-darwin" --title "$V"
+          gh release create "$VERSION" vault-* --title "$V"
