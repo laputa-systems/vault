@@ -14,13 +14,15 @@ The `--gate` harness was rerun on 2026-10-21 on macOS 27.0.1 arm64, hardware Mac
 
 Owner action required: provide a valid `Vault Signing`, Developer ID Application, or Apple Development identity and private key. Provide a `.provisionprofile` that authorizes the identity's Team ID, the selected bundle identifier, and `keychain-access-groups`. The harness scans `~/Library/MobileDevice/Provisioning Profiles` and `~/Library/Developer/Xcode/UserData/Provisioning Profiles`. The profile must be embedded in an app-like bundle. After installing those credentials, rerun `TMPDIR=.work/tmp tests/security_macos/run.sh --gate`. Run the opt-in authorization checks from a real TTY only after the Data Protection probe succeeds. Until then, protected storage and migration remain blocked.
 
+Self-signing or ad-hoc signing alone cannot authorize the restricted access group because it does not provide the required provisioning profile. An Apple Development profile may support local use without distribution; whether a free account can create one that authorizes this entitlement remains unverified. Treat the identity/profile as the immediate technical prerequisite, while investigating free local eligibility separately. Do not enroll an account or purchase membership as part of that investigation.
+
 This follow-up is an implementation campaign to close the remaining macOS authorization/storage gate when prerequisites are available, not a request to weaken the policy or to reimplement completed CLI hardening.
 
 ## P0 — establish signing and entitlement prerequisites
 
 1. Inspect the latest main, existing security harness, code-signing identities, and available provisioning profiles. Reuse the harness; do not write to the real login Keychain service in tests.
 2. Consult Apple TN3137/TN3125 and Secretive's current signing/entitlement and SecureEnclaveStore implementation. Distinguish macOS file-based from Data Protection Keychains and clarify entitlements, bundle identifier, Team ID, and provisioning-profile requirements for the intended CLI packaging.
-3. Try only authorized existing identities/profiles. Do not claim a self-signed or ad-hoc certificate is sufficient to grant restricted entitlements. Do not fabricate/sign with unavailable credentials or enroll the user in an Apple Developer account without explicit approval.
+3. Try only authorized existing identities/profiles. Do not claim a self-signed or ad-hoc certificate is sufficient to grant restricted entitlements. Investigate whether an Apple Development profile can authorize the required group for free local use, without enrolling the user or purchasing membership. Do not fabricate/sign with unavailable credentials.
 4. If necessary, construct the smallest app-like bundle around the Rust CLI. Prefer no GUI, background helper, IPC, daemon, or LaunchAgent. Validate the real installed PATH invocation, re-signing/update behavior, and recovery of stable Keychain identity.
 5. If external identity/profile prerequisites remain unavailable, stop just that gate, list exactly what credentials/configuration the owner must provide, and finish the independent documentation/tests. Do not claim protected storage is working.
 

@@ -61,6 +61,10 @@ requires a provisioning profile to authorize that entitlement and an app-like
 bundle to embed the profile ([TN3137](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains),
 [TN3125](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles)).
 The current package does not provide a proven Data Protection Keychain path.
+A self-signed or ad-hoc signature alone cannot authorize the required access
+group. A local Apple Development profile may be enough without distributing
+the app, but it is unverified whether a free account can create a profile with
+this entitlement. See [Apple's development profile requirements](https://developer.apple.com/help/account/provisioning-profiles/create-a-development-provisioning-profile/).
 
 ## Linux age store
 

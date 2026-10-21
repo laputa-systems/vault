@@ -18,6 +18,8 @@ Run `tests/security_macos/run.sh --gate` to repeat the noninteractive checks and
 
 The app-like attempt requires an existing profile that authorizes the signing identity, the bundle identifier, and the `keychain-access-groups` entitlement. If no matching profile is installed, the script records the missing prerequisite and parks that attempt.
 
+Self-signing or ad-hoc signing alone does not authorize the required access group. A local Apple Development profile may work without distribution, but free account eligibility for this entitlement has not been established.
+
 ## Run the interactive checks
 
 Run `tests/security_macos/run.sh --interactive` from a terminal to opt in. The script requires a TTY before it starts. It repeats the ad-hoc, existing-identity, and matching-profile gate, then uses the strongest available existing signer and app bundle for the interactive check. It records the hardware model, macOS version, signing identity, TTY, SSH, tmux, console user, and launchd manager session.
