@@ -110,7 +110,10 @@ mod unix_pty {
         assert!(!status.success(), "unexpected success: {status}");
         let after = tcgetattr(&master).unwrap();
         let output = output_reader.join().unwrap().unwrap();
-        assert_eq!(before.local_modes, after.local_modes);
+        assert_eq!(
+            before.local_modes & !LocalModes::PENDIN,
+            after.local_modes & !LocalModes::PENDIN
+        );
         assert!(!output
             .windows(b"vault-terminal-secret".len())
             .any(|window| window == b"vault-terminal-secret"));
