@@ -19,24 +19,8 @@ mod imp {
         kSecClassGenericPassword, kSecValueData,
     };
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
-    use std::ffi::{CString, c_char, c_int, c_void};
+    use std::ffi::c_void;
     use std::ptr;
-
-    const EINTR: c_int = 4;
-
-    unsafe extern "C" {
-        fn _NSGetEnviron() -> *mut *mut *mut c_char;
-        fn __error() -> *mut c_int;
-        fn posix_spawn(
-            pid: *mut c_int,
-            path: *const c_char,
-            file_actions: *const c_void,
-            attrp: *const c_void,
-            argv: *const *mut c_char,
-            envp: *const *mut c_char,
-        ) -> c_int;
-        fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
-    }
 
     // Pointer-type coercion helper. The kSec* constants from
     // security-framework-sys are typed as CFStringRef = *const __CFString;
@@ -187,69 +171,6 @@ mod imp {
         Ok(count)
     }
 
-    pub fn lock(service: &str) -> Result<(), String> {
-        let service = CString::new(service)
-            .map_err(|e| format!("vault: lock failed: invalid service: {e}"))?;
-        let arguments = [
-            c"/usr/bin/security".as_ptr().cast_mut(),
-            c"set-generic-password-partition-list".as_ptr().cast_mut(),
-            c"-s".as_ptr().cast_mut(),
-            service.as_ptr().cast_mut(),
-            c"-S".as_ptr().cast_mut(),
-            c"".as_ptr().cast_mut(),
-            ptr::null_mut(),
-        ];
-        let mut pid = 0;
-        let environment_pointer = unsafe { _NSGetEnviron() };
-        if environment_pointer.is_null() {
-            return Err("vault: lock failed: missing process environment".to_owned());
-        }
-        let environment = unsafe { *environment_pointer };
-        if environment.is_null() {
-            return Err("vault: lock failed: missing process environment".to_owned());
-        }
-        let spawn_status = unsafe {
-            posix_spawn(
-                &mut pid,
-                arguments[0],
-                ptr::null(),
-                ptr::null(),
-                arguments.as_ptr(),
-                environment,
-            )
-        };
-        if spawn_status != 0 {
-            return Err(format!("vault: lock failed: could not spawn security (error {spawn_status})"));
-        }
-
-        let mut status = 0;
-        loop {
-            let result = unsafe { waitpid(pid, &mut status, 0) };
-            if result == pid {
-                break;
-            }
-            if result < 0 {
-                let error = unsafe { *__error() };
-                if error == EINTR {
-                    continue;
-                }
-                return Err(format!("vault: lock failed: waitpid failed (errno {error})"));
-            }
-            return Err(format!("vault: lock failed: unexpected waitpid result {result}"));
-        }
-
-        let signal = status & 0x7f;
-        if signal != 0 && signal != 0x7f {
-            return Err(format!("vault: lock failed: security terminated by signal {signal}"));
-        }
-        let exit_status = (status >> 8) & 0xff;
-        if exit_status == 0 {
-            Ok(())
-        } else {
-            Err(format!("vault: lock failed: security exited with status {exit_status}"))
-        }
-    }
-
     pub fn list(service: &str) -> Result<Vec<String>, String> {
         let items = match ItemSearchOptions::new()
             .class(ItemClass::generic_password())
@@ -327,10 +248,6 @@ mod imp {
         Ok(before)
     }
 
-    pub fn lock(_service: &str) -> Result<(), String> {
-        Ok(())
-    }
-
     pub fn list(service: &str) -> Result<Vec<String>, String> {
         let service = service.to_string();
         let guard = STORE.lock().unwrap();
@@ -358,10 +275,6 @@ pub fn delete_secret(name: &str) -> Result<(), String> {
 
 pub fn purge_secrets() -> Result<usize, String> {
     imp::purge(SERVICE)
-}
-
-pub fn lock_secrets() -> Result<(), String> {
-    imp::lock(SERVICE)
 }
 
 pub fn list_secrets() -> Result<Vec<String>, String> {
