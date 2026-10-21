@@ -7,10 +7,11 @@ use rustix::fs::{
 use rustix::io::Errno;
 use std::ffi::{CString, OsString};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_SECRET_BYTES: usize = 16 * 1024 * 1024;
@@ -27,6 +28,21 @@ const INIT_PREFIX: &str = ".vault-init-";
 const TEMP_PREFIX: &str = ".tmp-";
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+const IDENTITY_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const USER_SESSION_KEYRING: libc::c_int = -5;
+const KEYCTL_SETPERM: libc::c_long = 5;
+const KEYCTL_UNLINK: libc::c_long = 9;
+const KEYCTL_SEARCH: libc::c_long = 10;
+const KEYCTL_READ: libc::c_long = 11;
+const KEYCTL_SET_TIMEOUT: libc::c_long = 15;
+const KEY_POS_READ: libc::c_uint = 0x0200_0000;
+const KEY_POS_WRITE: libc::c_uint = 0x0400_0000;
+const KEY_POS_SEARCH: libc::c_uint = 0x0800_0000;
+const KEY_POS_SETATTR: libc::c_uint = 0x2000_0000;
+const CACHE_KEY_POSSESSOR_PERMISSIONS: libc::c_uint =
+    KEY_POS_READ | KEY_POS_WRITE | KEY_POS_SEARCH | KEY_POS_SETATTR;
+const CACHE_KEYRING_POSSESSOR_PERMISSIONS: libc::c_uint =
+    KEY_POS_WRITE | KEY_POS_SEARCH | KEY_POS_SETATTR;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -63,14 +79,16 @@ pub(crate) fn set_secret(
 pub(crate) fn get_secret(
     name: &str,
     prompt: impl FnOnce(PassphrasePrompt) -> Result<SecretString, String>,
+    cache_warning: impl FnMut(&str) -> io::Result<()>,
 ) -> Result<String, String> {
-    let mut values = get_secrets(&[name], prompt)?;
+    let mut values = get_secrets(&[name], prompt, cache_warning)?;
     Ok(values.remove(0))
 }
 
 pub(crate) fn get_secrets(
     names: &[&str],
     prompt: impl FnOnce(PassphrasePrompt) -> Result<SecretString, String>,
+    cache_warning: impl FnMut(&str) -> io::Result<()>,
 ) -> Result<Vec<String>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
@@ -79,7 +97,7 @@ pub(crate) fn get_secrets(
         validate_name(name)?;
     }
     let data_home = data_home()?;
-    get_secrets_at(&data_home, names, prompt)
+    get_secrets_at_with_warning(&data_home, names, prompt, cache_warning)
 }
 
 pub(crate) fn delete_secret(name: &str) -> Result<(), String> {
@@ -155,10 +173,20 @@ fn set_secret_at(
     initialize_store(&data, name, value, passphrase)
 }
 
+#[cfg(test)]
 fn get_secrets_at(
     data_home: &Path,
     names: &[&str],
     prompt: impl FnOnce(PassphrasePrompt) -> Result<SecretString, String>,
+) -> Result<Vec<String>, String> {
+    get_secrets_at_with_warning(data_home, names, prompt, |_| Ok(()))
+}
+
+fn get_secrets_at_with_warning(
+    data_home: &Path,
+    names: &[&str],
+    prompt: impl FnOnce(PassphrasePrompt) -> Result<SecretString, String>,
+    mut cache_warning: impl FnMut(&str) -> io::Result<()>,
 ) -> Result<Vec<String>, String> {
     let data = open_data_home(data_home, false)?
         .ok_or_else(|| "vault: Linux store is not initialized; run vault set NAME".to_owned())?;
@@ -171,8 +199,14 @@ fn get_secrets_at(
     let encrypted_identity = read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT)
         .map_err(|error| format!("vault: cannot read encrypted identity: {error}"))?;
     let recipient = read_recipient(&store.root)?;
-    let passphrase = prompt(PassphrasePrompt::Unlock)?;
-    let identity = decrypt_identity(&encrypted_identity, passphrase)?;
+    let identity = match read_cached_identity(&recipient) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => decrypt_identity(&encrypted_identity, prompt(PassphrasePrompt::Unlock)?)?,
+        Err(error) => {
+            report_cache_warning(&mut cache_warning, &error)?;
+            decrypt_identity(&encrypted_identity, prompt(PassphrasePrompt::Unlock)?)?
+        }
+    };
     if identity.to_public().to_string() != recipient.to_string() {
         return Err("vault: recipient does not match the encrypted identity".to_owned());
     }
@@ -182,6 +216,9 @@ fn get_secrets_at(
         values.push(decrypt_secret(&identity, &ciphertext).map_err(|error| {
             format!("vault: {name}: encrypted secret is damaged or cannot be decrypted: {error}")
         })?);
+    }
+    if let Err(error) = cache_identity(&identity, &recipient) {
+        report_cache_warning(&mut cache_warning, &error)?;
     }
     Ok(values.into_iter().map(|mut value| std::mem::take(&mut *value)).collect())
 }
@@ -360,6 +397,258 @@ fn read_recipient(root: &File) -> Result<age::x25519::Recipient, String> {
         return Err("vault: public recipient is not in canonical form".to_owned());
     }
     Ok(recipient)
+}
+
+fn report_cache_warning(
+    cache_warning: &mut impl FnMut(&str) -> io::Result<()>,
+    warning: impl std::fmt::Display,
+) -> Result<(), String> {
+    cache_warning(&format!("Linux identity cache unavailable: {warning}"))
+        .map_err(|source| io_error("write identity cache warning", source))
+}
+
+fn read_cached_identity(
+    recipient: &age::x25519::Recipient,
+) -> Result<Option<age::x25519::Identity>, io::Error> {
+    let Some(keyring) = identity_cache_keyring(recipient, false)? else {
+        return Ok(None);
+    };
+    let Some(key) = search_keyring(keyring, c"user", c"identity")? else {
+        return Ok(None);
+    };
+
+    let mut payload = Zeroizing::new(vec![0u8; MAX_IDENTITY_PLAINTEXT]);
+    // SAFETY: The key ID is returned by KEYCTL_SEARCH and the buffer is writable for its declared length.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_READ,
+            key,
+            payload.as_mut_ptr(),
+            payload.len(),
+            0 as libc::c_long,
+        )
+    };
+    let length = match keyring_syscall_result(result) {
+        Ok(length) => usize::try_from(length)
+            .map_err(|_| io::Error::other("kernel returned an invalid identity cache length"))?,
+        Err(source) if cache_key_missing(&source) => return Ok(None),
+        Err(source) => return Err(source),
+    };
+    if length > payload.len() {
+        return Ok(None);
+    }
+    payload.truncate(length);
+    let Ok(text) = std::str::from_utf8(&payload) else {
+        return Ok(None);
+    };
+    let Ok(identity) = age::x25519::Identity::from_str(text) else {
+        return Ok(None);
+    };
+    if identity.to_public().to_string() != recipient.to_string() {
+        return Ok(None);
+    }
+    let canonical = identity.to_string();
+    if canonical.expose_secret().as_bytes() != payload.as_slice() {
+        return Ok(None);
+    }
+    Ok(Some(identity))
+}
+
+fn cache_identity(
+    identity: &age::x25519::Identity,
+    recipient: &age::x25519::Recipient,
+) -> Result<(), String> {
+    let keyring = identity_cache_keyring(recipient, true)
+        .map_err(|source| io_error("open identity cache keyring", source))?
+        .expect("cache keyring was created");
+    if let Err(source) = set_cache_permissions(keyring, CACHE_KEYRING_POSSESSOR_PERMISSIONS) {
+        return Err(cleanup_identity_cache_keyring(
+            keyring,
+            io_error("restrict identity cache keyring permissions", source),
+        ));
+    }
+    if let Err(source) = set_identity_cache_timeout(keyring) {
+        return Err(cleanup_identity_cache_keyring(
+            keyring,
+            io_error("set identity cache expiry", source),
+        ));
+    }
+
+    let payload = identity.to_string();
+    // SAFETY: The identity description is NUL-terminated and the payload slice remains live until the syscall copies it.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_add_key,
+            c"user".as_ptr(),
+            c"identity".as_ptr(),
+            payload.expose_secret().as_ptr(),
+            payload.expose_secret().len(),
+            keyring,
+        )
+    };
+    let key = keyring_syscall_result(result)
+        .map_err(|source| io_error("cache unlocked identity in kernel", source))?;
+    let key = libc::c_int::try_from(key)
+        .map_err(|_| "vault: kernel returned an invalid identity cache key".to_owned())?;
+    if let Err(source) = set_cache_permissions(key, CACHE_KEY_POSSESSOR_PERMISSIONS) {
+        return Err(cleanup_identity_cache_key(
+            key,
+            keyring,
+            io_error("restrict identity cache permissions", source),
+        ));
+    }
+    Ok(())
+}
+
+fn identity_cache_description(
+    recipient: &age::x25519::Recipient,
+) -> Result<std::ffi::CString, io::Error> {
+    std::ffi::CString::new(format!("vault:age:{}", recipient))
+        .map_err(|_| io::Error::other("age recipient produced an invalid cache description"))
+}
+
+fn identity_cache_keyring(
+    recipient: &age::x25519::Recipient,
+    create: bool,
+) -> Result<Option<libc::c_int>, io::Error> {
+    let description = identity_cache_description(recipient)?;
+    if let Some(keyring) = search_keyring(USER_SESSION_KEYRING, c"keyring", &description)? {
+        return Ok(Some(keyring));
+    }
+    if !create {
+        return Ok(None);
+    }
+
+    // SAFETY: The description is NUL-terminated; a keyring key requires a null payload of length zero.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_add_key,
+            c"keyring".as_ptr(),
+            description.as_ptr(),
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            USER_SESSION_KEYRING,
+        )
+    };
+    let keyring = keyring_syscall_result(result)?;
+    libc::c_int::try_from(keyring)
+        .map(Some)
+        .map_err(|_| io::Error::other("kernel returned an invalid identity cache keyring"))
+}
+
+fn search_keyring(
+    keyring: libc::c_int,
+    key_type: &std::ffi::CStr,
+    description: &std::ffi::CStr,
+) -> Result<Option<libc::c_int>, io::Error> {
+    // SAFETY: The type and description strings stay live for the syscall, and a zero destination prevents SEARCH from linking the result.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_SEARCH,
+            keyring,
+            key_type.as_ptr(),
+            description.as_ptr(),
+            0 as libc::c_long,
+        )
+    };
+    let key = match keyring_syscall_result(result) {
+        Ok(key) => key,
+        Err(source) if cache_key_missing(&source) => return Ok(None),
+        Err(source) => return Err(source),
+    };
+    libc::c_int::try_from(key)
+        .map(Some)
+        .map_err(|_| io::Error::other("kernel returned an invalid identity cache key"))
+}
+
+fn set_cache_permissions(key: libc::c_int, permissions: libc::c_uint) -> Result<(), io::Error> {
+    // SAFETY: SETPERM receives scalar key and permission values; its unused arguments are zero.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_SETPERM,
+            key,
+            permissions,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        )
+    };
+    keyring_syscall_result(result).map(|_| ())
+}
+
+fn set_identity_cache_timeout(key: libc::c_int) -> Result<(), io::Error> {
+    let timeout = libc::c_uint::try_from(IDENTITY_CACHE_TTL.as_secs())
+        .map_err(|_| io::Error::other("identity cache timeout exceeds the kernel limit"))?;
+    // SAFETY: SET_TIMEOUT receives a scalar key and bounded timeout; its unused arguments are zero.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_SET_TIMEOUT,
+            key,
+            timeout,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        )
+    };
+    keyring_syscall_result(result).map(|_| ())
+}
+
+fn cleanup_identity_cache_keyring(keyring: libc::c_int, primary: String) -> String {
+    match keyring_unlink(keyring, USER_SESSION_KEYRING) {
+        Ok(()) => primary,
+        Err(cleanup) => format!("{primary}; identity cache cleanup failed: {cleanup}"),
+    }
+}
+
+fn cleanup_identity_cache_key(
+    key: libc::c_int,
+    keyring: libc::c_int,
+    primary: String,
+) -> String {
+    match keyring_unlink(key, keyring) {
+        Ok(()) => primary,
+        Err(cleanup) => format!("{primary}; identity cache cleanup failed: {cleanup}"),
+    }
+}
+
+fn keyring_unlink(key: libc::c_int, keyring: libc::c_int) -> Result<(), io::Error> {
+    // SAFETY: UNLINK receives scalar key IDs; its unused arguments are zero.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_UNLINK,
+            key,
+            keyring,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        )
+    };
+    keyring_syscall_result(result).map(|_| ())
+}
+
+#[cfg(test)]
+fn remove_cached_identity(recipient: &age::x25519::Recipient) -> Result<(), io::Error> {
+    let Some(keyring) = identity_cache_keyring(recipient, false)? else {
+        return Ok(());
+    };
+    keyring_unlink(keyring, USER_SESSION_KEYRING)
+}
+
+fn keyring_syscall_result(result: libc::c_long) -> Result<libc::c_long, io::Error> {
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result)
+    }
+}
+
+fn cache_key_missing(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOKEY) | Some(libc::ENOENT) | Some(libc::EKEYEXPIRED)
+    )
 }
 
 fn read_private_file(dir: &File, name: &str, max_size: usize) -> Result<Vec<u8>, String> {
@@ -799,6 +1088,12 @@ mod tests {
 
     impl Drop for TestDir {
         fn drop(&mut self) {
+            if let Ok(Some(data)) = open_data_home(&self.0, false)
+                && let Ok(Some(store)) = open_store(&data)
+                && let Ok(recipient) = read_recipient(&store.root)
+            {
+                let _ = remove_cached_identity(&recipient);
+            }
             let _ = fs::remove_dir_all(&self.0);
         }
     }
@@ -867,6 +1162,45 @@ mod tests {
         assert_eq!(age::decrypt(&identity, &token).unwrap(), b"second");
         assert!(recipient.to_string().starts_with("age1"));
         assert_eq!(get_secrets_at(temp.path(), &["TOKEN", "DATABASE_URL"], unlock("a passphrase with spaces")).unwrap(), ["second", "postgres://user:secret@db"]);
+    }
+
+    #[test]
+    fn unlocked_identity_is_reused_without_another_passphrase_prompt() {
+        let temp = TestDir::new();
+        initialize(temp.path());
+        let data = open_data_home(temp.path(), false).unwrap().unwrap();
+        let store = open_store(&data).unwrap().unwrap();
+        let recipient = read_recipient(&store.root).unwrap();
+
+        assert_eq!(
+            get_secrets_at(temp.path(), &["TOKEN"], unlock("a passphrase with spaces")).unwrap(),
+            ["first"]
+        );
+
+        let expect_prompt = !matches!(read_cached_identity(&recipient), Ok(Some(_)));
+        let mut prompted = false;
+        assert_eq!(
+            get_secrets_at(temp.path(), &["TOKEN"], |_| {
+                prompted = true;
+                Ok(passphrase("a passphrase with spaces"))
+            })
+            .unwrap(),
+            ["first"]
+        );
+        assert_eq!(prompted, expect_prompt);
+    }
+
+    #[test]
+    fn documented_identity_cache_timeout_matches_linux_policy() {
+        let documented = include_str!("../README.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let minutes = IDENTITY_CACHE_TTL.as_secs() / 60;
+        assert!(
+            documented.contains(&format!("expires after {minutes} minutes of inactivity")),
+            "README must document the Linux identity cache timeout"
+        );
     }
 
     #[test]

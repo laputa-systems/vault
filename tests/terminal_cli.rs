@@ -150,6 +150,55 @@ mod unix_pty {
     }
 
     #[cfg(target_os = "linux")]
+    fn clear_cached_identity(data_home: &std::path::Path) -> io::Result<()> {
+        const KEY_SPEC_USER_SESSION_KEYRING: libc::c_int = -5;
+        const KEYCTL_SEARCH: libc::c_long = 10;
+        const KEYCTL_UNLINK: libc::c_long = 9;
+        let recipient = std::fs::read_to_string(data_home.join("vault/recipient"))?;
+        let description = std::ffi::CString::new(format!(
+            "vault:age:{}",
+            recipient.trim_end_matches('\n')
+        ))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        // SAFETY: Both strings stay live for the syscall, and a zero destination prevents SEARCH from linking the result.
+        let key = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_SEARCH,
+                KEY_SPEC_USER_SESSION_KEYRING,
+                c"keyring".as_ptr(),
+                description.as_ptr(),
+                0 as libc::c_long,
+            )
+        };
+        if key == -1 {
+            let error = io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOKEY) | Some(libc::ENOENT)) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let key = libc::c_int::try_from(key)
+            .map_err(|_| io::Error::other("kernel returned an invalid identity cache key"))?;
+        // SAFETY: UNLINK receives scalar key IDs and an existing user-session keyring ID.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_UNLINK,
+                key,
+                KEY_SPEC_USER_SESSION_KEYRING,
+                0 as libc::c_long,
+                0 as libc::c_long,
+            )
+        };
+        if result == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn read_terminal_chunks(mut reader: File, sender: mpsc::Sender<Vec<u8>>) {
         let mut buffer = [0u8; 1024];
         loop {
@@ -535,6 +584,19 @@ mod unix_pty {
         assert!(!exec_terminal_output
             .windows(passphrase.len())
             .any(|window| window == passphrase.as_bytes()));
+
+        let cached_get = launch_headless(
+            data_home.path(),
+            &["get", "TOKEN"],
+            Stdio::null(),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+        assert!(cached_get.status.success());
+        assert_eq!(cached_get.stdout, b"pipe-secret\n");
+        assert!(cached_get.stderr.is_empty());
+        clear_cached_identity(data_home.path()).unwrap();
 
         let listed = launch_headless(data_home.path(), &["ls"], Stdio::null())
             .unwrap()

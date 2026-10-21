@@ -62,8 +62,11 @@ The first `vault set NAME` initializes the store: `vault` asks for a master
 passphrase and confirmation, creates an age identity, and encrypts that
 identity with the passphrase. It then encrypts each secret to the identity's
 public recipient. Later `set` and `isset` operations use the public recipient
-and do not need the passphrase. `get` and exec mode ask for the passphrase to
-unlock the identity; `ls`, `rm`, and `purge` do not.
+and do not need the passphrase. The first `get` or exec read asks for the
+passphrase. After a successful unlock, `vault` caches the decrypted identity in
+the Linux per-user session keyring. The cache expires after 15 minutes of
+inactivity. Successful reads refresh it when kernel keyring access is
+available. `ls`, `rm`, and `purge` do not unlock the identity.
 
 The store is under `$XDG_DATA_HOME/vault` when `XDG_DATA_HOME` is an absolute
 path. Otherwise it uses `$HOME/.local/share/vault`. It contains
@@ -72,10 +75,11 @@ Secret values are limited to 16 MiB. Secret names and the public recipient are
 visible in this layout.
 
 Passphrase entry uses a controlling terminal with echo disabled. This works
-when stdout is redirected, for example `token=$(vault get API_KEY)`, but
-unlocking requires a usable terminal. A fully headless invocation without a
-controlling terminal cannot prompt; no passphrase environment variable or
-command-line option is provided.
+when stdout is redirected, for example `token=$(vault get API_KEY)`. A cached
+identity can be used without a terminal until it expires. Without a usable
+cache, a fully headless invocation cannot prompt. `vault` has no passphrase
+environment variable or command-line option. If the kernel keyring is disabled
+or unavailable, reads still work but ask for the passphrase each time.
 
 ### Backup and recovery
 
@@ -96,15 +100,16 @@ command.
 
 ### Security limits
 
-Linux passphrase entry is enforced by `vault`; it is not backed by the Secure
-Enclave or macOS Keychain access-control policies. A process that can control
-the running user's executable or already runs as that user may capture the
-passphrase or secrets. Store permissions protect against other local users. A
-process with write access to the XDG data directory can replace the public
-recipient. Later authenticated reads detect a mismatch with the encrypted
-identity and fail without rebuilding the store, but `set` does not unlock the
-identity and can encrypt a new secret to a replaced recipient. Treat same-user
-write access as trusted.
+On Linux, `vault` prompts for the master passphrase. The prompt does not use
+Secure Enclave or macOS Keychain access controls. A process that controls
+`vault` or already runs as the same user may capture the passphrase, cached
+identity, or secrets. Other processes with access to the user-session keyring
+can use the cached identity until it expires. Store permissions protect
+against other local users. A process with write access to the XDG data
+directory can replace the public recipient. Later reads detect a mismatch
+with the encrypted identity and fail without rebuilding the store. Because
+`set` does not unlock the identity, it can encrypt a new secret to a replaced
+recipient. Treat same-user write access as trusted.
 
 Secret names and recipient metadata are not encrypted. `vault get` intentionally
 reveals a secret on stdout. Exec mode places requested secrets in child

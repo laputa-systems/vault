@@ -14,13 +14,14 @@ Work autonomously. Make sound engineering decisions without stopping for approva
 
 ## Current checkpoint
 
-The Linux age backend, documentation, installation, and release matrix are implemented. Local Linux tests, Clippy, Alpine musl release build/install, and Linux GNU plus macOS compile checks pass. macOS runtime verification and an external `rage` CLI interoperability check were unavailable on this host. Same-user write access can replace the public recipient and redirect passphrase-free `set`; this boundary is documented.
+The Linux age backend, documentation, installation, and release matrix are implemented. Linux reads cache the unlocked identity in the user-session kernel keyring with an inactivity timeout. Local Linux tests, Clippy, Alpine musl release build/install, and Linux GNU plus macOS compile checks pass. macOS runtime verification and an external `rage` CLI interoperability check were unavailable on this host. Same-user write access can replace the public recipient and redirect passphrase-free `set`. The README documents this boundary.
 
 ## 1. Nonnegotiable principles
 
 - Rust only. Use the `age` crate directly, not the Go `age` executable or an external `rage` process.
 - No systemd, D-Bus, PAM, GNOME Keyring, KWallet, Secret Service, or other session-service dependencies.
-- No daemon, background process, agent, cached unlock state, or socket.
+- No daemon, background process, agent, or socket.
+- Cache only the unlocked identity in the Linux user-session kernel keyring, with an inactivity timeout.
 - No Tokio or async runtime. Preserve the synchronous architecture.
 - No database, configuration framework, CLI framework, or general-purpose secret-management abstraction.
 - No custom cryptographic primitives or homemade encryption formats.
@@ -126,9 +127,9 @@ The public recipient permits encryption without unlocking the private identity.
 
 After initialization, `vault set` should therefore normally operate without requesting the master passphrase.
 
-Reading a secret requires decrypting `identity.age`, so `vault get` and exec mode must request the master passphrase.
+Reading a secret decrypts `identity.age`. On Linux, `vault get` and exec mode request the passphrase after the identity cache expires or becomes unavailable.
 
-Do not implement a persistent identity cache.
+Never cache the master passphrase. Cache the unlocked identity only in the Linux user-session kernel keyring, and refresh its fixed inactivity timeout on successful reads.
 
 Understand and document that this design provides cryptographic confidentiality at rest, not macOS-equivalent OS-enforced user presence or resistance to malicious processes already running as the user.
 
@@ -266,7 +267,7 @@ The prompt appears on the terminal, while stdout contains only the requested sec
 
 If no usable controlling terminal exists, fail explicitly. Do not add an insecure passphrase environment variable or command-line option as a convenience fallback.
 
-Do not introduce password caching or an unattended unlock mode.
+Do not cache the passphrase or introduce an unattended unlock mode. Cache only the decrypted identity in the Linux user-session kernel keyring, with a fixed inactivity timeout.
 
 ## 7. Filesystem security and durability
 
@@ -499,7 +500,7 @@ Do not expand this campaign into:
 - A D-Bus compatibility layer
 - A PAM module
 - A daemon
-- A persistent unlocked session
+- An unbounded unlocked session
 - A synchronization protocol
 - Cloud backup
 - GUI integration

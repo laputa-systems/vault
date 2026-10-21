@@ -319,7 +319,8 @@ fn get_secret(name: &str) -> Result<String, CliError> {
 
 #[cfg(target_os = "linux")]
 fn get_secret(name: &str) -> Result<String, CliError> {
-    storage::get_secret(name, prompt_master_passphrase).map_err(CliError::Storage)
+    storage::get_secret(name, prompt_master_passphrase, report_identity_cache_warning)
+        .map_err(CliError::Storage)
 }
 
 fn cmd_rm(args: &[String]) -> Result<(), CliError> {
@@ -396,12 +397,20 @@ fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    storage::get_secrets(names, prompt_master_passphrase).map_err(CliError::Storage)
+    storage::get_secrets(names, prompt_master_passphrase, report_identity_cache_warning)
+        .map_err(CliError::Storage)
 }
 
 #[cfg(target_os = "linux")]
 fn prompt_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretString, String> {
     read_master_passphrase(prompt).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn report_identity_cache_warning(message: &str) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    writeln!(stderr, "vault: {message}")?;
+    stderr.flush()
 }
 
 fn parse_exec_args(args: &[String]) -> Result<(&[String], &[String]), CliError> {
