@@ -22,7 +22,7 @@ The `vault lock` command was removed because an isolated file-Keychain `userPres
 
 Run `vault set NAME` to enter a value at a masked terminal prompt. If stdin is not a terminal, `set` reads stdin without a prompt. Run `vault isset NAME` to read stdin without a prompt or echo.
 
-Terminal input fails on invalid UTF-8 or if `vault` cannot disable or restore terminal echo. Press Ctrl-C during terminal input to cancel. `vault` restores the terminal and exits without storing the input.
+Terminal input fails on invalid UTF-8 or if `vault` cannot disable or restore terminal echo. Press Ctrl-C during terminal input to cancel. `vault` restores the terminal and exits without storing the input. Press Ctrl-Z to suspend `vault`; it restores the terminal while stopped and resumes masked input when continued.
 
 ```sh
 vault set API_KEY

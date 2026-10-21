@@ -2,7 +2,7 @@
 
 Repository: https://github.com/laputa-systems/vault
 
-Status: ready for execution; preflight only, campaign not started.
+Status: implementation complete with the Data Protection Keychain storage gate parked on missing signing prerequisites.
 
 ## Objective
 
@@ -219,7 +219,19 @@ Secure Enclave encryption of arbitrary exportable values is a feasibility study 
 
 2026-10-18 — Safe baseline checks passed as recorded above. Full integration suite withheld because tests query production Keychain state.
 
-No campaign phase has run. At close, report the selected architecture, actual backend, auth and tmux outcomes, signing/profile requirements, migration guarantees, lock result, exact tests, macOS/hardware/session details, remaining limits, changed files, and local commit hashes. Do not claim interactive behavior that was not demonstrated.
+2026-10-21 — P0 completed. The isolated harness selected no protected-storage architecture because explicit Data Protection Keychain add with the ad-hoc executable returned `missing-entitlement`. An explicit Data Protection query did not find the file-Keychain record. `security find-identity -v -p codesigning` reported zero valid identities, and the standard per-user provisioning-profile directories were absent, so the existing-identity and app-like bundle/profile paths were unavailable. No Data Protection record was created. User-presence, denial, update, cross-identity, and `LAContext` reuse behavior therefore remain unproven; P2 storage and migration implementation are parked without a weaker fallback. The current CLI continues using the default file-based Keychain and has no migration command. The harness confirmed that a file-based `userPresence` item remained readable with interaction disabled before and after `security set-generic-password-partition-list -S ''`; see `tests/security_macos/README.md` for exact test setup, cleanup, tmux, TTY, and session limits.
+
+2026-10-21 — Removed the ineffective `vault lock` command and the exported `keychain::lock_secrets` Rust API. This is an intentional CLI and Rust API breaking change authorized by the owner; the partition-list edit did not revoke access to the isolated file item. No replacement authorization-revocation behavior is claimed.
+
+2026-10-21 — P1 completed. Terminal input now fails closed on terminal-setting errors, reports read/write/restore failures, rejects invalid UTF-8 after restoration, cancels without storage on interrupt, and restores terminal settings before job-control suspension. PTY coverage verifies Ctrl-C restoration, no echo, invalid UTF-8 handling, and Ctrl-Z restore/resume behavior. Exec builds child environment overrides without mutating the parent; child spawn remains direct with inherited streams and status. Purge validates its arguments before storage access. Production-Keychain absence checks were removed from default integration tests.
+
+2026-10-21 — P3 completed. README and help describe tested CLI behavior and the unproven storage/signing limits. No install or signing recipe was added because no supported Data Protection package path was available. Makefile, CI, release workflow, and pinned Rust nightly are unchanged.
+
+2026-10-21 — P4 merged local commits `d28a1f1`, `718ea6e`, `3c08a8a`, `d3ebbdb`, `21daa00`, `384d012`. `TMPDIR=.work/tmp cargo test --test terminal_cli`, `TMPDIR=.work/tmp cargo test`, and `TMPDIR=.work/tmp cargo clippy --all-targets --all-features -- --deny warnings` passed on the integrated tree. Full suite: 15 library, 11 binary, 21 integration, and 3 PTY tests passed. The isolated harness `--gate`, TTY opt-in, attached and detached local tmux runs, and `sh -n` passed as documented. No production Keychain service was queried. No release build or install was run.
+
+2026-10-21 — The debug executable is 1,001,760 bytes, compared with the 847,184-byte baseline (increase 154,576 bytes). No dependencies were added. This is a debug-binary comparison, not a release-size or performance result.
+
+At close, protected storage, migration, and signed packaging remain blocked on an existing valid signing identity and provisioning profile authorizing the Data Protection Keychain access group. The tests establish no biometric prompt, authorization fallback, cross-identity denial, locked-session behavior, or SSH tmux behavior. Host and session details are in `tests/security_macos/README.md`. Commits remain local; nothing was pushed or installed.
 
 ## Launch instruction
 
