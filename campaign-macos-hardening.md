@@ -2,7 +2,9 @@
 
 Repository: https://github.com/laputa-systems/vault
 
-Status: CLI hardening and isolated harness completed; protected storage and biometric enforcement **blocked/incomplete** pending an authorized signing identity and provisioning profile. See campaign-macos-followup.md.
+Status: CLI hardening and the isolated harness are complete. Protected storage, migration, and biometric enforcement remain **blocked/incomplete** pending a valid signing identity and a matching provisioning profile. See [campaign-macos-followup.md](campaign-macos-followup.md).
+
+Current ruling: keep the existing file-based Keychain as an explicit compatibility mode so current items remain usable. Help and README now warn that `userPresence` enforcement is unverified. Do not implement Data Protection storage or migration until a provisioned package passes positive and negative authorization tests.
 
 ## 2026-10-21 completion follow-up
 
@@ -234,6 +236,16 @@ Secure Enclave encryption of arbitrary exportable values is a feasibility study 
 2026-10-21 — P4 merged local commits `d28a1f1`, `718ea6e`, `3c08a8a`, `d3ebbdb`, `21daa00`, `384d012`. `TMPDIR=.work/tmp cargo test --test terminal_cli`, `TMPDIR=.work/tmp cargo test`, and `TMPDIR=.work/tmp cargo clippy --all-targets --all-features -- --deny warnings` passed on the integrated tree. Full suite: 15 library, 11 binary, 21 integration, and 3 PTY tests passed. The isolated harness `--gate`, TTY opt-in, attached and detached local tmux runs, and `sh -n` passed as documented. No production Keychain service was queried. No release build or install was run.
 
 2026-10-21 — The debug executable is 1,001,760 bytes, compared with the 847,184-byte baseline (increase 154,576 bytes). No dependencies were added. This is a debug-binary comparison, not a release-size or performance result.
+
+2026-10-21 — Re-ran `TMPDIR=.work/tmp tests/security_macos/run.sh --gate` on macOS 27.0.1 arm64, hardware Mac17,7. File-Keychain add and exact read passed. A dummy file item with `userPresence` was readable with interaction disabled. The explicit Data Protection add returned `missing-entitlement`, and its query did not find the file item. The partition-list command did not revoke access. The harness found no valid `Vault Signing`, Developer ID Application, or Apple Development identity and no profile in either standard per-user provisioning-profile directory. Exact records and the disposable keychain were removed, and the search list was restored. No production service was queried. See [tests/security_macos/README.md](tests/security_macos/README.md) for the complete observations.
+
+2026-10-21 — Chose to retain the default file-based Keychain as a clearly labeled compatibility mode while the signing gate is blocked. This keeps existing current-service items usable and leaves their stored format unchanged. It does not meet the protected-storage objective. The CLI help and README disclose the observed lack of proven `userPresence` enforcement. A macOS integration test checks that help and README keep the same compatibility-mode label.
+
+The owner must provide a valid `Vault Signing`, Developer ID Application, or Apple Development identity and private key. The owner must also provide a `.provisionprofile` that authorizes the identity's Team ID, the selected bundle identifier, and `keychain-access-groups`. Place the profile in `~/Library/MobileDevice/Provisioning Profiles` or `~/Library/Developer/Xcode/UserData/Provisioning Profiles`; the harness scans those directories. The profile must be embedded in an app-like bundle. After installing those prerequisites, rerun `TMPDIR=.work/tmp tests/security_macos/run.sh --gate`. Begin storage and migration work only if the app-like Data Protection probe succeeds and negative authorization checks deny access.
+
+2026-10-21: `TMPDIR=.work/tmp cargo test` passed with 15 library, 11 binary, 22 integration, and 3 PTY tests. `TMPDIR=.work/tmp cargo clippy --all-targets --all-features -- --deny warnings` passed. The candidate macOS debug executable is 1,039,264 bytes, 64 bytes larger than the 1,039,200-byte build from the pre-change `86366fe` tree. No release build or install was run.
+
+2026-10-21: The `ultrareview` command and review tool were unavailable. An independent read-only review found no findings.
 
 At close, protected storage, migration, and signed packaging remain blocked on an existing valid signing identity and provisioning profile authorizing the Data Protection Keychain access group. The tests establish no biometric prompt, authorization fallback, cross-identity denial, locked-session behavior, or SSH tmux behavior. Host and session details are in `tests/security_macos/README.md`. Commits remain local; nothing was pushed or installed.
 

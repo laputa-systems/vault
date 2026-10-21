@@ -49,6 +49,15 @@ Examples:
   vault -- cargo run
 ";
 
+#[cfg(target_os = "macos")]
+const STORAGE_WARNING: &str = concat!(
+    "macOS security warning: vault uses the file-based Keychain in compatibility mode. ",
+    "userPresence enforcement is unverified. The harness read a dummy item with interaction disabled.\n",
+);
+
+#[cfg(not(target_os = "macos"))]
+const STORAGE_WARNING: &str = "";
+
 static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
 #[cfg(target_os = "linux")]
 const SIG_TSTP: i32 = 20;
@@ -191,7 +200,7 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<ExitCode, CliError> {
     if args.is_empty() {
-        write_stdout(USAGE.as_bytes())?;
+        write_usage()?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -221,11 +230,16 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
         "-h" | "--help" | "help" => {
-            write_stdout(USAGE.as_bytes())?;
+            write_usage()?;
             Ok(ExitCode::SUCCESS)
         }
         _ => exec_mode(args),
     }
+}
+
+fn write_usage() -> Result<(), CliError> {
+    write_stdout(USAGE.as_bytes())?;
+    write_stdout(STORAGE_WARNING.as_bytes())
 }
 
 fn write_stdout(bytes: &[u8]) -> Result<(), CliError> {

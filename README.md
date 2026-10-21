@@ -44,15 +44,23 @@ returns the child's exit status.
 
 ## macOS Keychain
 
-On macOS, secrets remain Generic Password items in the existing file-based
-Keychain namespace, and each read continues to use the existing Keychain
-request. New items request `userPresence` and
-`WhenUnlockedThisDeviceOnly`. The tested host could read a dummy item with
-interaction disabled, so actual per-read user-presence enforcement remains
-unverified. The tested signing setup could not add an item to the Data
-Protection Keychain. Updates change an existing item's value without replacing
-its access control, so an existing item's policy may be weaker. `vault` does
-not migrate or rewrite existing Keychain data as part of Linux support.
+**Security warning:** `vault` uses the file-based Keychain in compatibility mode.
+It does not select the Data Protection Keychain. The harness read a dummy item
+with interaction disabled. `userPresence` enforcement is unverified for this
+backend.
+
+`set` and `get` continue to use the current file-based Keychain records so
+existing secrets remain usable. New Generic Password items request
+`userPresence` and `WhenUnlockedThisDeviceOnly`. Updating an item changes its
+value without replacing its access policy, which may be weaker. `vault` has no
+migration command.
+
+`make install` signs a standalone executable with `SIGN_ID`. That signature
+does not authorize the restricted `keychain-access-groups` entitlement. Apple
+requires a provisioning profile to authorize that entitlement and an app-like
+bundle to embed the profile ([TN3137](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains),
+[TN3125](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles)).
+The current package does not provide a proven Data Protection Keychain path.
 
 ## Linux age store
 

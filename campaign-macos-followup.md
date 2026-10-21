@@ -10,6 +10,10 @@ The shared CLI hardening and isolated macOS security harness have been implement
 
 The harness has already demonstrated that a dummy file-based Keychain item requesting userPresence can be read with interaction disabled. An explicit Data Protection Keychain add failed with missing-entitlement. The examined host had zero valid code-signing identities and no suitable provisioning profile; thus biometric enforcement, second-identity denial, authenticated multi-secret reads, and migration were not verified. See tests/security_macos/README.md.
 
+The `--gate` harness was rerun on 2026-10-21 on macOS 27.0.1 arm64, hardware Mac17,7. It reproduced `missing-entitlement`, found no valid signing identity, and found no installed profile in either standard per-user profile directory. The file-based `userPresence` item remained readable with interaction disabled, and the partition-list command did not revoke access. The run removed its exact dummy items and disposable keychain and restored the original search list.
+
+Owner action required: provide a valid `Vault Signing`, Developer ID Application, or Apple Development identity and private key. Provide a `.provisionprofile` that authorizes the identity's Team ID, the selected bundle identifier, and `keychain-access-groups`. The harness scans `~/Library/MobileDevice/Provisioning Profiles` and `~/Library/Developer/Xcode/UserData/Provisioning Profiles`. The profile must be embedded in an app-like bundle. After installing those credentials, rerun `TMPDIR=.work/tmp tests/security_macos/run.sh --gate`. Run the opt-in authorization checks from a real TTY only after the Data Protection probe succeeds. Until then, protected storage and migration remain blocked.
+
 This follow-up is an implementation campaign to close the remaining macOS authorization/storage gate when prerequisites are available, not a request to weaken the policy or to reimplement completed CLI hardening.
 
 ## P0 — establish signing and entitlement prerequisites
@@ -50,7 +54,7 @@ Implement an explicit, idempotent, fail-closed migration only **after** the prot
 
 While the signing gate remains unresolved, the existing backend continues to use the file-based Keychain with unproven userPresence protection. Make the unsafe assumption conspicuous in help and README, and document exactly what currently works.
 
-Decide explicitly whether unprotected-by-policy new writes should continue as a clearly labeled legacy compatibility mode or be gated until secure setup. Do not silently change the stored format, break existing reads, or destroy data; if a fail-closed policy change is needed, implement it with a clear migration/recovery path and documented compatibility impact.
+Decision: keep the current file-based backend in a clearly labeled compatibility mode. This preserves existing reads and writes without changing the stored format. The help and README warn that `userPresence` enforcement is unverified and report the isolated test that read a dummy item with interaction disabled. This mode does not satisfy the protected-storage goal. Do not silently change the stored format, break existing reads, or destroy data.
 
 The removed macOS vault lock command must stay removed unless an actual revocation mechanism is demonstrated by negative tests; do not reintroduce the old partition-list workaround.
 

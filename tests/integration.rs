@@ -31,6 +31,32 @@ fn help_flags_show_usage_to_stdout() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_keychain_compatibility_warning_stays_in_help_and_readme() {
+    let out = vault(&["--help"]).unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let readme = include_str!("../README.md").replace('\n', " ");
+    let compatibility_mode = "uses the file-based Keychain in compatibility mode";
+    assert!(
+        stdout.contains("macOS security warning")
+            && stdout.contains("userPresence enforcement is unverified")
+            && stdout.contains("dummy item with interaction disabled")
+            && stdout.contains(compatibility_mode),
+        "CLI help must disclose the unverified file-Keychain policy: {stdout:?}"
+    );
+    assert!(
+        readme.contains(compatibility_mode),
+        "README must repeat the CLI's compatibility-mode label so its storage warning stays consistent"
+    );
+    assert!(
+        readme.contains("`userPresence` enforcement is unverified")
+            && readme.contains("dummy item with interaction disabled"),
+        "README must preserve the same observed Keychain limitation as CLI help"
+    );
+}
+
 #[test]
 fn set_rejects_empty_name() {
     let out = vault(&["set", ""]).unwrap();
