@@ -2,7 +2,11 @@
 
 Repository: https://github.com/laputa-systems/vault
 
-Status: implementation complete with the Data Protection Keychain storage gate parked on missing signing prerequisites.
+Status: CLI hardening and isolated harness completed; protected storage and biometric enforcement **blocked/incomplete** pending an authorized signing identity and provisioning profile. See campaign-macos-followup.md.
+
+## 2026-10-21 completion follow-up
+
+Status: **blocked/incomplete for protected macOS storage**. The CLI hardening and isolated harness landed; the Data Protection Keychain and Touch ID authorization gate did not. See [campaign-macos-followup.md](campaign-macos-followup.md) for the remaining signing, enforcement, migration, and release acceptance criteria. Do not treat missing entitlements as a successful implementation.
 
 ## Objective
 

@@ -12,6 +12,10 @@ This is an implementation campaign, not a design exercise. Inspect the current r
 
 Work autonomously. Make sound engineering decisions without stopping for approval. Prefer the simplest correct implementation, but never sacrifice security or data integrity for brevity.
 
+## 2026-10-21 follow-up audit
+
+Status: implemented but **not security-accepted**. Read [campaign-linux-followup.md](campaign-linux-followup.md) and execute its P0/P1/P2 acceptance gates before declaring the campaign complete. The latest code includes a per-UID Linux kernel-keyring identity cache; its security implications and revocation are not yet fully tested. The original checklist's external age/rage interoperability criterion also remains unverified.
+
 ## Current checkpoint
 
 The Linux age backend, documentation, installation, and release matrix are implemented. Linux reads cache the unlocked identity in the user-session kernel keyring with an inactivity timeout. Local Linux tests, Clippy, Alpine musl release build/install, and Linux GNU plus macOS compile checks pass. macOS runtime verification and an external `rage` CLI interoperability check were unavailable on this host. Same-user write access can replace the public recipient and redirect passphrase-free `set`. The README documents this boundary.
