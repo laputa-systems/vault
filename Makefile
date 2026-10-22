@@ -4,6 +4,7 @@ PREFIX ?= $(HOME)/usr
 
 SIGN_ID ?= -
 OS := $(shell uname -s)
+MUSL_LINK_FLAGS := $(if $(findstring linux-musl,$(TARGET)),-C link-arg=-fuse-ld=mold,)
 
 lint:
 	cargo fmt --all
@@ -16,7 +17,7 @@ install: dist
 
 dist:
 	cargo clean -p $(NAME) --release --target $(TARGET)
-	RUSTFLAGS="-Zlocation-detail=none -Zshare-generics=y -Zunstable-options -Cpanic=immediate-abort -Cforce-unwind-tables=n -Clink-arg=-Wl,-x" \
+	RUSTFLAGS="-Zlocation-detail=none -Zshare-generics=y -Zunstable-options -Cpanic=immediate-abort -Cforce-unwind-tables=n -Clink-arg=-Wl,-x $(MUSL_LINK_FLAGS)" \
 	cargo build --profile dist \
 	  -Z build-std=std \
 	  -Z build-std-features= \

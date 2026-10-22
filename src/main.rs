@@ -5,7 +5,8 @@ use std::os::fd::AsFd;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use age::secrecy::SecretString;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
+use crate::store::MAX_SECRET_BYTES;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -26,7 +27,7 @@ use std::fs::OpenOptions;
 #[cfg(target_os = "macos")]
 use crate::macos as storage;
 
-const USAGE: &str = "\
+const USAGE_HEADER: &str = "\
   vault — secret manager
 
 Usage:
@@ -37,9 +38,16 @@ Usage:
   vault rm    <NAME>            Delete a secret
   vault ls                      List all stored secret names
   vault purge                   Delete every secret vault manages
+";
 
-  vault recover                 Rewrap the age identity with a new Secure Enclave key
+#[cfg(target_os = "linux")]
+const PLATFORM_USAGE: &str = "  vault lock                    Remove this store's cached identity\n";
 
+#[cfg(target_os = "macos")]
+const PLATFORM_USAGE: &str = "  vault recover                 Rewrap the age identity with a new Secure Enclave key\n";
+
+const USAGE_FOOTER: &str = "\
+\n\
   vault [ENV ...] -- <CMD> [ARGS ...]   Run CMD with secrets injected
 
 Environment specifications before -- may be:
@@ -116,6 +124,7 @@ enum CliError {
     SignalSuspend(io::Error),
     InvalidUtf8,
     Interrupted(i32),
+    InputTooLarge(usize),
 }
 
 impl fmt::Display for CliError {
@@ -166,6 +175,13 @@ impl fmt::Display for CliError {
             }
             Self::InvalidUtf8 => f.write_str("vault: failed to read input: invalid UTF-8"),
             Self::Interrupted(_) => f.write_str("vault: input interrupted"),
+            Self::InputTooLarge(limit) => {
+                if limit % (1024 * 1024) == 0 {
+                    write!(f, "vault: input exceeds {} MiB limit", limit / (1024 * 1024))
+                } else {
+                    write!(f, "vault: input exceeds {limit} byte limit")
+                }
+            }
         }
     }
 }
@@ -185,6 +201,7 @@ impl std::error::Error for CliError {
             Self::InvalidInput(_)
             | Self::Storage(_)
             | Self::InvalidUtf8
+            | Self::InputTooLarge(_)
             | Self::Interrupted(_) => None,
         }
     }
@@ -233,6 +250,11 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
             cmd_purge(&args[1..])?;
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(target_os = "linux")]
+        "lock" => {
+            cmd_lock(&args[1..])?;
+            Ok(ExitCode::SUCCESS)
+        }
         #[cfg(target_os = "macos")]
         "recover" => {
             cmd_recover(&args[1..])?;
@@ -247,7 +269,9 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
 }
 
 fn write_usage() -> Result<(), CliError> {
-    write_stdout(USAGE.as_bytes())?;
+    write_stdout(USAGE_HEADER.as_bytes())?;
+    write_stdout(PLATFORM_USAGE.as_bytes())?;
+    write_stdout(USAGE_FOOTER.as_bytes())?;
     write_stdout(STORAGE_WARNING.as_bytes())
 }
 
@@ -294,6 +318,8 @@ fn require_exact_name<'a>(args: &'a [String], cmd: &str) -> Result<&'a str, CliE
 
 fn cmd_set(args: &[String], silent: bool) -> Result<(), CliError> {
     let name = require_exact_name(args, if silent { "isset" } else { "set" })?;
+    #[cfg(target_os = "linux")]
+    crate::store::validate_name(name).map_err(CliError::InvalidInput)?;
     let value = read_secret(name, silent)?;
     persist_secret(name, Ok(value), store_secret)
 }
@@ -356,6 +382,15 @@ fn cmd_ls(args: &[String]) -> Result<(), CliError> {
 
 fn cmd_purge(args: &[String]) -> Result<(), CliError> {
     cmd_purge_with(args, storage::purge_secrets)
+}
+
+#[cfg(target_os = "linux")]
+fn cmd_lock(args: &[String]) -> Result<(), CliError> {
+    require_no_args(args, "lock")?;
+    match storage::clear_identity_cache().map_err(CliError::Storage)? {
+        linux::CacheClearResult::Cleared => write_stdout(b"identity cache cleared\n"),
+        linux::CacheClearResult::AlreadyClear => write_stdout(b"identity cache already clear\n"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -528,6 +563,7 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
             &mut stdin.lock(),
             &mut io::stderr().lock(),
             silent,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || {
                 let signal = PENDING_SIGNAL.load(Ordering::Relaxed);
@@ -546,24 +582,46 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
             signals.suspend_and_resume()?;
             signals.restore().map_err(CliError::SignalRestore)?;
         }
-        let value = read_result?;
+        let mut value = read_result?;
         let signal = PENDING_SIGNAL.load(Ordering::Relaxed);
         if signal != 0 {
+            value.zeroize();
             return Err(CliError::Interrupted(signal));
         }
         Ok(value)
     } else {
-        let mut bytes = Vec::new();
-        stdin
-            .lock()
-            .read_to_end(&mut bytes)
-            .map_err(|source| CliError::Io {
-                operation: "read stdin",
-                source,
-            })?;
-        let mut value = String::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
-        strip_trailing_newline(&mut value);
-        Ok(value)
+        read_limited_utf8(stdin.lock(), MAX_SECRET_BYTES)
+    }
+}
+
+fn read_limited_utf8(reader: impl Read, limit: usize) -> Result<String, CliError> {
+    let read_limit = limit.saturating_add(3) as u64;
+    let mut bytes = Zeroizing::new(Vec::new());
+    reader
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|source| CliError::Io {
+            operation: "read stdin",
+            source,
+        })?;
+    if bytes.ends_with(b"\n") {
+        bytes.pop();
+        if bytes.ends_with(b"\r") {
+            bytes.pop();
+        }
+    } else if bytes.ends_with(b"\r") {
+        bytes.pop();
+    }
+    if bytes.len() > limit {
+        return Err(CliError::InputTooLarge(limit));
+    }
+    match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            bytes.zeroize();
+            Err(CliError::InvalidUtf8)
+        }
     }
 }
 
@@ -605,6 +663,7 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
         &mut tty,
         &mut output,
         true,
+        MAX_SECRET_BYTES,
         &mut terminal,
         || {
             let signal = PENDING_SIGNAL.load(Ordering::Relaxed);
@@ -615,6 +674,9 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
     let signal_restore = signals.restore();
     let newline_result = output.write_all(b"\n").and_then(|()| output.flush());
     if let Err(source) = signal_restore {
+        if let Ok(mut value) = read_result {
+            value.zeroize();
+        }
         return Err(CliError::SignalRestore(source));
     }
     if PENDING_SIGNAL.load(Ordering::Relaxed) == SIG_TSTP {
@@ -623,12 +685,16 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
     }
     let pending_signal = PENDING_SIGNAL.load(Ordering::Relaxed);
     if pending_signal != 0 {
+        if let Ok(mut value) = read_result {
+            value.zeroize();
+        }
         return Err(CliError::Interrupted(pending_signal));
     }
     let value = match (read_result, newline_result) {
         (Ok(value), Ok(())) => value,
         (Err(error), Ok(())) => return Err(error),
-        (Ok(_), Err(source)) => {
+        (Ok(mut value), Err(source)) => {
+            value.zeroize();
             return Err(CliError::Io {
                 operation: "write passphrase prompt",
                 source,
@@ -654,6 +720,7 @@ fn read_without_echo<R, W, T, I, S>(
     input: &mut R,
     feedback: &mut W,
     silent: bool,
+    max_bytes: usize,
     terminal: &mut T,
     mut interrupted: I,
     mut suspend: S,
@@ -665,7 +732,7 @@ where
     I: FnMut() -> Option<i32>,
     S: FnMut() -> Result<(), CliError>,
 {
-    let mut value = Vec::new();
+    let mut value = Zeroizing::new(Vec::new());
     loop {
         let mut session = TerminalSession::enter(terminal)?;
         let read_result = read_terminal_line(
@@ -673,6 +740,7 @@ where
             feedback,
             silent,
             &mut value,
+            max_bytes,
             &mut interrupted,
         );
         let restore_result = session
@@ -713,7 +781,14 @@ where
             source,
         })?;
     }
-    String::from_utf8(value).map_err(|_| CliError::InvalidUtf8)
+    match String::from_utf8(std::mem::take(&mut *value)) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            bytes.zeroize();
+            Err(CliError::InvalidUtf8)
+        }
+    }
 }
 
 fn read_terminal_line<R, W, I>(
@@ -721,6 +796,7 @@ fn read_terminal_line<R, W, I>(
     feedback: &mut W,
     silent: bool,
     value: &mut Vec<u8>,
+    max_bytes: usize,
     interrupted: &mut I,
 ) -> Result<TerminalRead, CliError>
 where
@@ -752,6 +828,9 @@ where
                         }
                     }
                     byte => {
+                        if value.len() >= max_bytes {
+                            return Err(CliError::InputTooLarge(max_bytes));
+                        }
                         value.push(byte);
                         if !silent {
                             feedback.write_all(b"*").map_err(|source| CliError::Io {
@@ -926,20 +1005,11 @@ impl Drop for SignalHandlers {
     }
 }
 
-fn strip_trailing_newline(value: &mut String) {
-    if value.ends_with('\n') {
-        value.pop();
-    }
-    if value.ends_with('\r') {
-        value.pop();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, EnvSpec, TerminalSettings, cmd_purge_with, parse_env_spec, parse_exec_args,
-        persist_secret, read_without_echo, run_child,
+        CliError, EnvSpec, MAX_SECRET_BYTES, TerminalSettings, cmd_purge_with, parse_env_spec,
+        parse_exec_args, persist_secret, read_limited_utf8, read_without_echo, run_child,
     };
     use std::io::{self, Cursor, Read, Write};
 
@@ -1014,6 +1084,21 @@ mod tests {
         }
     }
 
+    struct RepeatingReader {
+        remaining: usize,
+        bytes_read: usize,
+    }
+
+    impl Read for RepeatingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.remaining.min(buffer.len());
+            buffer[..count].fill(b'x');
+            self.remaining -= count;
+            self.bytes_read += count;
+            Ok(count)
+        }
+    }
+
     #[test]
     fn env_spec_requires_nonempty_name_and_one_equals_sign() {
         assert!(matches!(
@@ -1078,6 +1163,7 @@ mod tests {
             &mut input,
             &mut feedback,
             true,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || None,
             || Ok(()),
@@ -1090,6 +1176,63 @@ mod tests {
     }
 
     #[test]
+    fn piped_input_is_bounded_and_accepts_the_exact_limit_with_line_endings() {
+        for input in [b"abc".as_slice(), b"abc\n", b"abc\r", b"abc\r\n"] {
+            assert_eq!(read_limited_utf8(input, 3).unwrap(), "abc");
+        }
+
+        let mut input = RepeatingReader {
+            remaining: 100,
+            bytes_read: 0,
+        };
+        assert!(matches!(read_limited_utf8(&mut input, 3), Err(CliError::InputTooLarge(3))));
+        assert_eq!(input.bytes_read, 6);
+
+        let input = vec![b'x'; MAX_SECRET_BYTES + 1];
+        assert!(matches!(
+            read_limited_utf8(&input[..], MAX_SECRET_BYTES),
+            Err(CliError::InputTooLarge(MAX_SECRET_BYTES))
+        ));
+    }
+
+    #[test]
+    fn terminal_input_limit_restores_echo_and_accepts_the_exact_boundary() {
+        let mut terminal = FakeTerminal::ready();
+        let mut input = Cursor::new(b"abc\n".to_vec());
+        assert_eq!(
+            read_without_echo(
+                &mut input,
+                &mut Vec::new(),
+                true,
+                3,
+                &mut terminal,
+                || None,
+                || Ok(()),
+            )
+            .unwrap(),
+            "abc"
+        );
+        assert!(terminal.echo_enabled);
+
+        let mut terminal = FakeTerminal::ready();
+        let mut feedback = Vec::new();
+        let error = read_without_echo(
+            &mut Cursor::new(b"abcd\n"),
+            &mut feedback,
+            false,
+            3,
+            &mut terminal,
+            || None,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::InputTooLarge(3)));
+        assert!(terminal.echo_enabled);
+        assert_eq!(terminal.restores, 1);
+        assert_eq!(feedback, b"***");
+    }
+
+    #[test]
     fn terminal_input_rejects_invalid_utf8_after_restoration() {
         let mut terminal = FakeTerminal::ready();
         let mut input = Cursor::new(vec![0xc3, 0x28, b'\n']);
@@ -1097,6 +1240,7 @@ mod tests {
             &mut input,
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || None,
             || Ok(()),
@@ -1114,6 +1258,7 @@ mod tests {
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut get_failure,
             || None,
             || Ok(()),
@@ -1128,6 +1273,7 @@ mod tests {
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut set_failure,
             || None,
             || Ok(()),
@@ -1142,6 +1288,7 @@ mod tests {
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut restore_failure,
             || None,
             || Ok(()),
@@ -1158,6 +1305,7 @@ mod tests {
             &mut FailingReader,
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || None,
             || Ok(()),
@@ -1176,6 +1324,7 @@ mod tests {
             &mut FailingReader,
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || None,
             || Ok(()),
@@ -1189,6 +1338,7 @@ mod tests {
             &mut Cursor::new(b"secret\n"),
             &mut FailingWriter,
             false,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || None,
             || Ok(()),
@@ -1206,6 +1356,7 @@ mod tests {
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
             true,
+            MAX_SECRET_BYTES,
             &mut terminal,
             || Some(2),
             || Ok(()),

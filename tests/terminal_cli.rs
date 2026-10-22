@@ -5,6 +5,7 @@ mod unix_pty {
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::fd::FromRawFd;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -109,8 +110,29 @@ mod unix_pty {
         args: &[&str],
         stdin: Stdio,
     ) -> io::Result<Child> {
-        let executable = env!("CARGO_BIN_EXE_vault");
+        launch_binary_with_controlling_tty(
+            std::ffi::OsStr::new(env!("CARGO_BIN_EXE_vault")),
+            slave,
+            data_home,
+            args,
+            &[],
+            stdin,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn launch_binary_with_controlling_tty(
+        executable: &std::ffi::OsStr,
+        slave: &File,
+        data_home: &std::path::Path,
+        args: &[&str],
+        environment: &[(&str, &str)],
+        stdin: Stdio,
+    ) -> io::Result<Child> {
         let mut command = Command::new(executable);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
         command
             .args(args)
             .env("XDG_DATA_HOME", data_home)
@@ -147,55 +169,6 @@ mod unix_pty {
             command.pre_exec(|| rustix::process::setsid().map(|_| ()).map_err(io::Error::from));
         }
         command.spawn()
-    }
-
-    #[cfg(target_os = "linux")]
-    fn clear_cached_identity(data_home: &std::path::Path) -> io::Result<()> {
-        const KEY_SPEC_USER_SESSION_KEYRING: libc::c_int = -5;
-        const KEYCTL_SEARCH: libc::c_long = 10;
-        const KEYCTL_UNLINK: libc::c_long = 9;
-        let recipient = std::fs::read_to_string(data_home.join("vault/recipient"))?;
-        let description = std::ffi::CString::new(format!(
-            "vault:age:{}",
-            recipient.trim_end_matches('\n')
-        ))
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        // SAFETY: Both strings stay live for the syscall, and a zero destination prevents SEARCH from linking the result.
-        let key = unsafe {
-            libc::syscall(
-                libc::SYS_keyctl,
-                KEYCTL_SEARCH,
-                KEY_SPEC_USER_SESSION_KEYRING,
-                c"keyring".as_ptr(),
-                description.as_ptr(),
-                0 as libc::c_long,
-            )
-        };
-        if key == -1 {
-            let error = io::Error::last_os_error();
-            if matches!(error.raw_os_error(), Some(libc::ENOKEY) | Some(libc::ENOENT)) {
-                return Ok(());
-            }
-            return Err(error);
-        }
-        let key = libc::c_int::try_from(key)
-            .map_err(|_| io::Error::other("kernel returned an invalid identity cache key"))?;
-        // SAFETY: UNLINK receives scalar key IDs and an existing user-session keyring ID.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_keyctl,
-                KEYCTL_UNLINK,
-                key,
-                KEY_SPEC_USER_SESSION_KEYRING,
-                0 as libc::c_long,
-                0 as libc::c_long,
-            )
-        };
-        if result == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
     }
 
     #[cfg(target_os = "linux")]
@@ -593,10 +566,43 @@ mod unix_pty {
         .unwrap()
         .wait_with_output()
         .unwrap();
-        assert!(cached_get.status.success());
-        assert_eq!(cached_get.stdout, b"pipe-secret\n");
-        assert!(cached_get.stderr.is_empty());
-        clear_cached_identity(data_home.path()).unwrap();
+        let cache_available = !String::from_utf8_lossy(&exec_terminal_output)
+            .contains("identity cache unavailable");
+        if cache_available {
+            assert!(cached_get.status.success());
+            assert_eq!(cached_get.stdout, b"pipe-secret\n");
+            assert!(cached_get.stderr.is_empty());
+
+            let locked = launch_headless(data_home.path(), &["lock"], Stdio::null())
+                .unwrap()
+                .wait_with_output()
+                .unwrap();
+            assert!(locked.status.success());
+            assert_eq!(locked.stdout, b"identity cache cleared\n");
+
+            let revoked_get = launch_headless(
+                data_home.path(),
+                &["get", "TOKEN"],
+                Stdio::null(),
+            )
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+            assert!(!revoked_get.status.success());
+            assert!(String::from_utf8_lossy(&revoked_get.stderr)
+                .contains("controlling terminal is required"));
+        } else {
+            assert!(!cached_get.status.success());
+            assert!(String::from_utf8_lossy(&cached_get.stderr)
+                .contains("controlling terminal is required"));
+            let lock = launch_headless(data_home.path(), &["lock"], Stdio::null())
+                .unwrap()
+                .wait_with_output()
+                .unwrap();
+            assert!(!lock.status.success());
+            assert!(String::from_utf8_lossy(&lock.stderr)
+                .contains("clear Linux identity cache failed"));
+        }
 
         let listed = launch_headless(data_home.path(), &["ls"], Stdio::null())
             .unwrap()
@@ -614,5 +620,261 @@ mod unix_pty {
         .wait_with_output()
         .unwrap();
         assert!(removed.status.success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_linux_name_fails_before_reading_piped_input() {
+        let data_home = TestDataHome::new().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vault"))
+            .args(["set", "INVALID-NAME"])
+            .env("XDG_DATA_HOME", data_home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let held_stdin = child.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let status = child.try_wait().unwrap();
+        drop(held_stdin);
+        if status.is_none() {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("vault blocked while reading input for an invalid name");
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid secret name"));
+        assert!(!data_home.path().join("vault").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn piped_secret_over_the_limit_fails_without_initializing_the_store() {
+        let data_home = TestDataHome::new().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vault"))
+            .args(["isset", "TOKEN"])
+            .env("XDG_DATA_HOME", data_home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let too_large = vec![b'x'; 16 * 1024 * 1024 + 1];
+        let _ = input.write_all(&too_large);
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("input exceeds 16 MiB limit"));
+        assert!(!data_home.path().join("vault").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_rage_interoperates_with_vault_age_files() {
+        let rage = match std::env::var_os("RAGE") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => match Command::new("rage").arg("--version").output() {
+                Ok(output) if output.status.success() => std::path::PathBuf::from("rage"),
+                _ => {
+                    eprintln!("skipped age interoperability: rage 0.12.1 is unavailable");
+                    return;
+                }
+            },
+        };
+        let version = Command::new(&rage).arg("--version").output().unwrap();
+        if !version.status.success() || !String::from_utf8_lossy(&version.stdout).contains("0.12.1") {
+            eprintln!("skipped age interoperability: rage 0.12.1 is required");
+            return;
+        }
+
+        let data_home = TestDataHome::new().unwrap();
+        let passphrase = "rage interoperability passphrase";
+        let (mut master, slave) = open_pty().unwrap();
+        let (sender, chunks) = mpsc::channel();
+        let reader = thread::spawn({
+            let reader = master.try_clone().unwrap();
+            move || read_terminal_chunks(reader, sender)
+        });
+        let mut set = launch_with_controlling_tty(
+            &slave,
+            data_home.path(),
+            &["set", "TOKEN"],
+            Stdio::piped(),
+        )
+        .unwrap();
+        drop(slave);
+        set.stdin
+            .take()
+            .unwrap()
+            .write_all(b"vault generated value")
+            .unwrap();
+        let mut terminal_output = Vec::new();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut terminal_output,
+            "Create master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut terminal_output,
+            "Confirm master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
+        assert!(set.wait_with_output().unwrap().status.success());
+        drop(master);
+        let terminal_output = finish_terminal_output(chunks, terminal_output).unwrap();
+        reader.join().unwrap();
+        assert!(!terminal_output
+            .windows(passphrase.len())
+            .any(|window| window == passphrase.as_bytes()));
+
+        let store = data_home.path().join("vault");
+        let identity_path = store.join("identity.age");
+        let secret_path = store.join("secrets/TOKEN.age");
+        let vault_ciphertext = std::fs::read(&secret_path).unwrap();
+        assert!(vault_ciphertext.starts_with(b"age-encryption.org/v1\n"));
+        assert!(!vault_ciphertext.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
+
+        let (mut master, slave) = open_pty().unwrap();
+        let (sender, chunks) = mpsc::channel();
+        let reader = thread::spawn({
+            let reader = master.try_clone().unwrap();
+            move || read_terminal_chunks(reader, sender)
+        });
+        let identity_arg = identity_path.to_str().unwrap();
+        let decrypt_identity = launch_binary_with_controlling_tty(
+            rage.as_os_str(),
+            &slave,
+            data_home.path(),
+            &["--decrypt", identity_arg],
+            &[("PINENTRY_PROGRAM", "")],
+            Stdio::null(),
+        )
+        .unwrap();
+        drop(slave);
+        let mut terminal_output = Vec::new();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut terminal_output,
+            "Type passphrase",
+            passphrase,
+        )
+        .unwrap();
+        let rage_identity = decrypt_identity.wait_with_output().unwrap();
+        assert!(rage_identity.status.success());
+        assert!(rage_identity.stdout.starts_with(b"AGE-SECRET-KEY-1"));
+        drop(master);
+        let terminal_output = finish_terminal_output(chunks, terminal_output).unwrap();
+        reader.join().unwrap();
+        assert!(!terminal_output
+            .windows(passphrase.len())
+            .any(|window| window == passphrase.as_bytes()));
+
+        let mut decrypt_vault_secret = Command::new(&rage)
+            .args(["--decrypt", "--identity", "-"])
+            .arg(&secret_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        decrypt_vault_secret
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&rage_identity.stdout)
+            .unwrap();
+        let decrypted = decrypt_vault_secret.wait_with_output().unwrap();
+        assert!(decrypted.status.success(), "{}", String::from_utf8_lossy(&decrypted.stderr));
+        assert_eq!(decrypted.stdout, b"vault generated value");
+
+        let recipient = std::fs::read_to_string(store.join("recipient")).unwrap();
+        let mut encrypt_rage_secret = Command::new(&rage)
+            .args(["--encrypt", "--recipient", recipient.trim()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        encrypt_rage_secret
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"rage generated value")
+            .unwrap();
+        let encrypted = encrypt_rage_secret.wait_with_output().unwrap();
+        assert!(encrypted.status.success(), "{}", String::from_utf8_lossy(&encrypted.stderr));
+        assert!(encrypted.stdout.starts_with(b"age-encryption.org/v1\n"));
+        let rage_ciphertext_path = store.join("secrets/RAGE.age");
+        std::fs::write(&rage_ciphertext_path, &encrypted.stdout).unwrap();
+        std::fs::set_permissions(
+            &rage_ciphertext_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let (mut master, slave) = open_pty().unwrap();
+        let (sender, chunks) = mpsc::channel();
+        let reader = thread::spawn({
+            let reader = master.try_clone().unwrap();
+            move || read_terminal_chunks(reader, sender)
+        });
+        let get = launch_with_controlling_tty(
+            &slave,
+            data_home.path(),
+            &["get", "RAGE"],
+            Stdio::null(),
+        )
+        .unwrap();
+        drop(slave);
+        let mut terminal_output = Vec::new();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut terminal_output,
+            "Master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
+        let output = get.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout, b"rage generated value\n");
+        drop(master);
+        finish_terminal_output(chunks, terminal_output).unwrap();
+        reader.join().unwrap();
+
+        let mut damaged = vault_ciphertext;
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+        let damaged_path = store.join("secrets/DAMAGED.age");
+        std::fs::write(&damaged_path, damaged).unwrap();
+        std::fs::set_permissions(&damaged_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut reject_damaged = Command::new(&rage)
+            .args(["--decrypt", "--identity", "-"])
+            .arg(&damaged_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        reject_damaged
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&rage_identity.stdout)
+            .unwrap();
+        assert!(!reject_damaged.wait_with_output().unwrap().status.success());
     }
 }

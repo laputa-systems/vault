@@ -18,6 +18,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     defaults:
@@ -27,9 +29,14 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install musl linker
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools mold
 
       - uses: Swatinem/rust-cache@v2
 
@@ -37,7 +44,11 @@ jobs:
         run: cargo test
 
       - name: Build release
-        run: make dist
+        run: make dist TARGET=${{ matrix.target }}
+
+      - name: Run musl binary
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: target/${{ matrix.target }}/dist/vault --help
 
       - uses: actions/upload-artifact@v4
         with:
@@ -57,7 +68,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           V="${VERSION#release/}"
-          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl; do
             mv "vault-${target}/vault" "vault-${V}-${target}"
           done
 

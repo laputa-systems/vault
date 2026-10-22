@@ -12,9 +12,9 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 use std::ffi::{CString, OsString};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -22,7 +22,6 @@ use zeroize::Zeroizing;
 
 const STORE_NAME: &str = "vault";
 const SECRETS_NAME: &str = "secrets";
-const LOCK_NAME: &str = ".vault.lock";
 const IDENTITY_NAME: &str = "identity.age";
 const RECIPIENT_NAME: &str = "recipient";
 const INIT_PREFIX: &str = ".vault-init-";
@@ -36,14 +35,17 @@ const KEYCTL_UNLINK: libc::c_long = 9;
 const KEYCTL_SEARCH: libc::c_long = 10;
 const KEYCTL_READ: libc::c_long = 11;
 const KEYCTL_SET_TIMEOUT: libc::c_long = 15;
+#[cfg(test)]
+const KEYCTL_DESCRIBE: libc::c_long = 6;
 const KEY_POS_READ: libc::c_uint = 0x0200_0000;
+const KEY_POS_VIEW: libc::c_uint = 0x0100_0000;
 const KEY_POS_WRITE: libc::c_uint = 0x0400_0000;
 const KEY_POS_SEARCH: libc::c_uint = 0x0800_0000;
 const KEY_POS_SETATTR: libc::c_uint = 0x2000_0000;
 const CACHE_KEY_POSSESSOR_PERMISSIONS: libc::c_uint =
-    KEY_POS_READ | KEY_POS_WRITE | KEY_POS_SEARCH | KEY_POS_SETATTR;
+    KEY_POS_VIEW | KEY_POS_READ | KEY_POS_WRITE | KEY_POS_SEARCH | KEY_POS_SETATTR;
 const CACHE_KEYRING_POSSESSOR_PERMISSIONS: libc::c_uint =
-    KEY_POS_WRITE | KEY_POS_SEARCH | KEY_POS_SETATTR;
+    KEY_POS_VIEW | KEY_POS_WRITE | KEY_POS_SEARCH | KEY_POS_SETATTR;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -66,6 +68,11 @@ impl PassphrasePrompt {
 struct Store {
     root: File,
     secrets: File,
+}
+
+pub(crate) enum CacheClearResult {
+    Cleared,
+    AlreadyClear,
 }
 
 pub(crate) fn set_secret(
@@ -117,6 +124,17 @@ pub(crate) fn purge_secrets() -> Result<usize, String> {
     purge_secrets_at(&data_home)
 }
 
+pub(crate) fn clear_identity_cache() -> Result<CacheClearResult, String> {
+    let data_home = data_home()?;
+    let data = open_data_home(&data_home, false)?
+        .ok_or_else(|| "vault: Linux store is not initialized".to_owned())?;
+    let store = open_store(&data)?
+        .ok_or_else(|| "vault: Linux store is not initialized".to_owned())?;
+    drop(store);
+    remove_cached_identity(&data)
+        .map_err(|source| io_error("clear Linux identity cache", source))
+}
+
 fn data_home() -> Result<PathBuf, String> {
     data_home_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
 }
@@ -147,14 +165,11 @@ fn set_secret_at(
         return Err(format!("vault: {name}: secret exceeds the {} MiB limit", MAX_SECRET_BYTES / (1024 * 1024)));
     }
     let data = open_data_home(data_home, true)?.expect("data home was created");
-    let lock = open_lock_file(&data)?;
-    flock(&lock, FlockOperation::LockExclusive)
+    flock(&data, FlockOperation::LockExclusive)
         .map_err(|source| io_error("lock Linux store", source))?;
-    cleanup_staging_directories(&data)?;
 
     if let Some(store) = open_store(&data)? {
         let recipient = validate_store_for_write(&store)?;
-        cleanup_temporary_files(&store.secrets)?;
         let ciphertext = encrypt_secret(&recipient, value)
             .map_err(|_| format!("vault: {name}: encryption failed"))?;
         if ciphertext.len() > MAX_SECRET_CIPHERTEXT {
@@ -200,11 +215,11 @@ fn get_secrets_at_with_warning(
     let encrypted_identity = read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT)
         .map_err(|error| format!("vault: cannot read encrypted identity: {error}"))?;
     let recipient = read_recipient(&store.root)?;
-    let identity = match read_cached_identity(&recipient) {
+    let identity = match read_cached_identity(&data, &recipient) {
         Ok(Some(identity)) => identity,
         Ok(None) => decrypt_identity(&encrypted_identity, prompt(PassphrasePrompt::Unlock)?)?,
         Err(error) => {
-            report_cache_warning(&mut cache_warning, &error)?;
+            report_cache_warning(&mut cache_warning, &error);
             decrypt_identity(&encrypted_identity, prompt(PassphrasePrompt::Unlock)?)?
         }
     };
@@ -216,8 +231,8 @@ fn get_secrets_at_with_warning(
             format!("vault: {name}: encrypted secret is damaged or cannot be decrypted: {error}")
         })?);
     }
-    if let Err(error) = cache_identity(&identity, &recipient) {
-        report_cache_warning(&mut cache_warning, &error)?;
+    if let Err(error) = cache_identity(&data, &identity) {
+        report_cache_warning(&mut cache_warning, &error);
     }
     Ok(values.into_iter().map(|mut value| std::mem::take(&mut *value)).collect())
 }
@@ -226,8 +241,7 @@ fn delete_secret_at(data_home: &Path, name: &str) -> Result<(), String> {
     let Some(data) = open_data_home(data_home, false)? else {
         return Err(format!("vault: {name}: not found"));
     };
-    let lock = open_lock_file(&data)?;
-    flock(&lock, FlockOperation::LockExclusive)
+    flock(&data, FlockOperation::LockExclusive)
         .map_err(|source| io_error("lock Linux store", source))?;
     let Some(store) = open_store(&data)? else {
         return Err(format!("vault: {name}: not found"));
@@ -254,8 +268,7 @@ fn purge_secrets_at(data_home: &Path) -> Result<usize, String> {
     let Some(data) = open_data_home(data_home, false)? else {
         return Ok(0);
     };
-    let lock = open_lock_file(&data)?;
-    flock(&lock, FlockOperation::LockExclusive)
+    flock(&data, FlockOperation::LockExclusive)
         .map_err(|source| io_error("lock Linux store", source))?;
     let Some(store) = open_store(&data)? else {
         return Ok(0);
@@ -277,38 +290,96 @@ fn open_data_home(path: &Path, create: bool) -> Result<Option<File>, String> {
     if !path.is_absolute() {
         return Err("vault: XDG data directory must be absolute".to_owned());
     }
-    if create {
-        fs::create_dir_all(path).map_err(|source| io_error("create XDG data directory", source))?;
+    let mut dir = File::from(
+        openat(
+            CWD,
+            "/",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|source| io_error("open filesystem root", source))?,
+    );
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => components.push(name),
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err("vault: XDG data directory contains an unsafe path component".to_owned());
+            }
+        }
     }
-    let dir = match openat(
-        CWD,
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => File::from(fd),
-        Err(Errno::NOENT) if !create => return Ok(None),
-        Err(source) => return Err(io_error("open XDG data directory", source)),
-    };
+    for (index, name) in components.iter().enumerate() {
+        let name = *name;
+        validate_path_parent(&dir)?;
+        let (next, created) = match openat(
+            &dir,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => (File::from(fd), false),
+            Err(Errno::NOENT) if !create => return Ok(None),
+            Err(Errno::NOENT) => {
+                let created = match mkdirat(&dir, name, mode(PRIVATE_DIRECTORY_MODE)) {
+                    Ok(()) => true,
+                    Err(Errno::EXIST) => false,
+                    Err(source) => return Err(io_error("create XDG data directory", source)),
+                };
+                let fd = openat(
+                    &dir,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|source| io_error("open XDG data directory component", source))?;
+                (File::from(fd), created)
+            }
+            Err(source) => return Err(io_error("open XDG data directory component", source)),
+        };
+        if created {
+            set_directory_mode(&next, PRIVATE_DIRECTORY_MODE, "XDG data directory component")?;
+        }
+        if index + 1 == components.len() {
+            verify_directory_owner(&next, "XDG data directory")?;
+            let metadata = fstat(&next).map_err(|source| io_error("inspect XDG data directory", source))?;
+            if metadata.st_mode & 0o022 != 0 {
+                return Err("vault: XDG data directory must not be group or world writable".to_owned());
+            }
+        }
+        dir = next;
+    }
+    verify_directory_owner(&dir, "XDG data directory")?;
     let metadata = fstat(&dir).map_err(|source| io_error("inspect XDG data directory", source))?;
-    if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
-        return Err("vault: XDG data path is not a directory".to_owned());
+    if metadata.st_mode & 0o022 != 0 {
+        return Err("vault: XDG data directory must not be group or world writable".to_owned());
     }
     Ok(Some(dir))
 }
 
-fn open_lock_file(data: &File) -> Result<File, String> {
-    let fd = openat(
-        data,
-        LOCK_NAME,
-        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        mode(PRIVATE_FILE_MODE),
-    )
-    .map_err(|source| io_error("open Linux store lock", source))?;
-    let file = File::from(fd);
-    ensure_regular_file(&file, "Linux store lock")?;
-    set_file_mode(&file, PRIVATE_FILE_MODE, "Linux store lock")?;
-    Ok(file)
+fn validate_path_parent(dir: &File) -> Result<(), String> {
+    let metadata = fstat(dir).map_err(|source| io_error("inspect XDG data path parent", source))?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
+        return Err("vault: XDG data path parent is not a directory".to_owned());
+    }
+    let owner = effective_uid();
+    if metadata.st_uid != owner && metadata.st_uid != 0 {
+        return Err("vault: XDG data path parent has an unexpected owner".to_owned());
+    }
+    if metadata.st_mode & 0o022 != 0
+        && !(metadata.st_uid == 0
+            && metadata.st_mode & 0o1000 != 0
+            && metadata.st_mode & 0o002 != 0
+            && metadata.st_mode & 0o020 == 0)
+    {
+        return Err("vault: XDG data path parent is writable by another user".to_owned());
+    }
+    Ok(())
+}
+
+fn effective_uid() -> libc::uid_t {
+    // SAFETY: geteuid has no pointer arguments and reads only the calling process credentials.
+    unsafe { libc::geteuid() }
 }
 
 fn open_store(data: &File) -> Result<Option<Store>, String> {
@@ -321,10 +392,10 @@ fn open_store(data: &File) -> Result<Option<Store>, String> {
         return Err("vault: Linux store path is not a directory".to_owned());
     }
     let root = open_directory_at(data, STORE_NAME, "Linux store directory")?;
-    set_directory_mode(&root, PRIVATE_DIRECTORY_MODE, "Linux store directory")?;
+    verify_directory_mode(&root, PRIVATE_DIRECTORY_MODE, "Linux store directory")?;
     let secrets = open_directory_at(&root, SECRETS_NAME, "secrets directory")
         .map_err(|error| format!("vault: Linux store is incomplete: {error}"))?;
-    set_directory_mode(&secrets, PRIVATE_DIRECTORY_MODE, "secrets directory")?;
+    verify_directory_mode(&secrets, PRIVATE_DIRECTORY_MODE, "secrets directory")?;
     Ok(Some(Store { root, secrets }))
 }
 
@@ -345,7 +416,24 @@ fn open_directory_at(parent: &File, name: &str, label: &str) -> Result<File, Str
 }
 
 fn set_directory_mode(dir: &File, expected: u32, label: &str) -> Result<(), String> {
+    verify_directory_owner(dir, label)?;
     fchmod(dir, mode(expected)).map_err(|source| io_error(&format!("set permissions on {label}"), source))?;
+    verify_directory_mode(dir, expected, label)
+}
+
+fn verify_directory_owner(dir: &File, label: &str) -> Result<(), String> {
+    let metadata = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
+    if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
+        return Err(format!("vault: {label} is not a directory"));
+    }
+    if metadata.st_uid != effective_uid() {
+        return Err(format!("vault: {label} has an unexpected owner"));
+    }
+    Ok(())
+}
+
+fn verify_directory_mode(dir: &File, expected: u32, label: &str) -> Result<(), String> {
+    verify_directory_owner(dir, label)?;
     let metadata = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
     if metadata.st_mode & 0o7777 != expected {
         return Err(format!("vault: {label} permissions must be {expected:04o}"));
@@ -361,11 +449,20 @@ fn ensure_regular_file(file: &File, label: &str) -> Result<(), String> {
     if metadata.st_nlink != 1 {
         return Err(format!("vault: {label} has an unexpected hard link"));
     }
+    if metadata.st_uid != effective_uid() {
+        return Err(format!("vault: {label} has an unexpected owner"));
+    }
     Ok(())
 }
 
 fn set_file_mode(file: &File, expected: u32, label: &str) -> Result<(), String> {
+    ensure_regular_file(file, label)?;
     fchmod(file, mode(expected)).map_err(|source| io_error(&format!("set permissions on {label}"), source))?;
+    verify_file_mode(file, expected, label)
+}
+
+fn verify_file_mode(file: &File, expected: u32, label: &str) -> Result<(), String> {
+    ensure_regular_file(file, label)?;
     let metadata = fstat(file).map_err(|source| io_error(&format!("inspect {label}"), source))?;
     if metadata.st_mode & 0o7777 != expected {
         return Err(format!("vault: {label} permissions must be {expected:04o}"));
@@ -390,15 +487,15 @@ fn read_recipient(root: &File) -> Result<age::x25519::Recipient, String> {
 fn report_cache_warning(
     cache_warning: &mut impl FnMut(&str) -> io::Result<()>,
     warning: impl std::fmt::Display,
-) -> Result<(), String> {
-    cache_warning(&format!("Linux identity cache unavailable: {warning}"))
-        .map_err(|source| io_error("write identity cache warning", source))
+) {
+    let _ = cache_warning(&format!("Linux identity cache unavailable: {warning}"));
 }
 
 fn read_cached_identity(
+    data_home: &File,
     recipient: &age::x25519::Recipient,
 ) -> Result<Option<age::x25519::Identity>, io::Error> {
-    let Some(keyring) = identity_cache_keyring(recipient, false)? else {
+    let Some(keyring) = identity_cache_keyring(data_home, false)? else {
         return Ok(None);
     };
     let Some(key) = search_keyring(keyring, c"user", c"identity")? else {
@@ -444,10 +541,10 @@ fn read_cached_identity(
 }
 
 fn cache_identity(
+    data_home: &File,
     identity: &age::x25519::Identity,
-    recipient: &age::x25519::Recipient,
 ) -> Result<(), String> {
-    let keyring = identity_cache_keyring(recipient, true)
+    let keyring = identity_cache_keyring(data_home, true)
         .map_err(|source| io_error("open identity cache keyring", source))?
         .expect("cache keyring was created");
     if let Err(source) = set_cache_permissions(keyring, CACHE_KEYRING_POSSESSOR_PERMISSIONS) {
@@ -456,13 +553,6 @@ fn cache_identity(
             io_error("restrict identity cache keyring permissions", source),
         ));
     }
-    if let Err(source) = set_identity_cache_timeout(keyring) {
-        return Err(cleanup_identity_cache_keyring(
-            keyring,
-            io_error("set identity cache expiry", source),
-        ));
-    }
-
     let payload = identity.to_string();
     // SAFETY: The identity description is NUL-terminated and the payload slice remains live until the syscall copies it.
     let result = unsafe {
@@ -486,21 +576,34 @@ fn cache_identity(
             io_error("restrict identity cache permissions", source),
         ));
     }
+    if let Err(source) = set_identity_cache_timeout(key) {
+        return Err(cleanup_identity_cache_key(
+            key,
+            keyring,
+            io_error("set identity cache expiry", source),
+        ));
+    }
     Ok(())
 }
 
 fn identity_cache_description(
-    recipient: &age::x25519::Recipient,
+    data_home: &File,
 ) -> Result<std::ffi::CString, io::Error> {
-    std::ffi::CString::new(format!("vault:age:{}", recipient))
-        .map_err(|_| io::Error::other("age recipient produced an invalid cache description"))
+    let metadata = fstat(data_home).map_err(io::Error::from)?;
+    std::ffi::CString::new(format!(
+        "vault:age:{}:{}:{}",
+        effective_uid(),
+        metadata.st_dev,
+        metadata.st_ino
+    ))
+    .map_err(|_| io::Error::other("XDG data directory produced an invalid cache description"))
 }
 
 fn identity_cache_keyring(
-    recipient: &age::x25519::Recipient,
+    data_home: &File,
     create: bool,
 ) -> Result<Option<libc::c_int>, io::Error> {
-    let description = identity_cache_description(recipient)?;
+    let description = identity_cache_description(data_home)?;
     if let Some(keyring) = search_keyring(USER_SESSION_KEYRING, c"keyring", &description)? {
         return Ok(Some(keyring));
     }
@@ -567,7 +670,11 @@ fn set_cache_permissions(key: libc::c_int, permissions: libc::c_uint) -> Result<
 }
 
 fn set_identity_cache_timeout(key: libc::c_int) -> Result<(), io::Error> {
-    let timeout = libc::c_uint::try_from(IDENTITY_CACHE_TTL.as_secs())
+    set_key_timeout(key, IDENTITY_CACHE_TTL)
+}
+
+fn set_key_timeout(key: libc::c_int, duration: Duration) -> Result<(), io::Error> {
+    let timeout = libc::c_uint::try_from(duration.as_secs())
         .map_err(|_| io::Error::other("identity cache timeout exceeds the kernel limit"))?;
     // SAFETY: SET_TIMEOUT receives a scalar key and bounded timeout; its unused arguments are zero.
     let result = unsafe {
@@ -581,6 +688,55 @@ fn set_identity_cache_timeout(key: libc::c_int) -> Result<(), io::Error> {
         )
     };
     keyring_syscall_result(result).map(|_| ())
+}
+
+#[cfg(test)]
+fn identity_cache_timeout(key: libc::c_int) -> Result<Duration, io::Error> {
+    let serial = format!("{key:08x}");
+    let keys = std::fs::read_to_string("/proc/keys")?;
+    let timeout = keys
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.first().copied() == Some(serial.as_str()))
+                .then(|| fields.get(3).copied())
+                .flatten()
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "cache key is not visible in /proc/keys"))?;
+    parse_key_timeout(timeout)
+}
+
+#[cfg(test)]
+fn parse_key_timeout(timeout: &str) -> Result<Duration, io::Error> {
+    let mut total = 0u64;
+    let mut value = 0u64;
+    for byte in timeout.bytes() {
+        if byte.is_ascii_digit() {
+            value = value
+                .checked_mul(10)
+                .and_then(|number| number.checked_add(u64::from(byte - b'0')))
+                .ok_or_else(|| io::Error::other("key timeout exceeds the supported range"))?;
+            continue;
+        }
+        let multiplier = match byte {
+            b's' => 1,
+            b'm' => 60,
+            b'h' => 60 * 60,
+            b'd' => 24 * 60 * 60,
+            b'w' => 7 * 24 * 60 * 60,
+            _ => return Err(io::Error::other("kernel returned an unknown key timeout unit")),
+        };
+        total = total
+            .checked_add(value.checked_mul(multiplier).ok_or_else(|| {
+                io::Error::other("key timeout exceeds the supported range")
+            })?)
+            .ok_or_else(|| io::Error::other("key timeout exceeds the supported range"))?;
+        value = 0;
+    }
+    if value != 0 || total == 0 {
+        return Err(io::Error::other("kernel returned an invalid key timeout"));
+    }
+    Ok(Duration::from_secs(total))
 }
 
 fn cleanup_identity_cache_keyring(keyring: libc::c_int, primary: String) -> String {
@@ -616,12 +772,14 @@ fn keyring_unlink(key: libc::c_int, keyring: libc::c_int) -> Result<(), io::Erro
     keyring_syscall_result(result).map(|_| ())
 }
 
-#[cfg(test)]
-fn remove_cached_identity(recipient: &age::x25519::Recipient) -> Result<(), io::Error> {
-    let Some(keyring) = identity_cache_keyring(recipient, false)? else {
-        return Ok(());
+fn remove_cached_identity(
+    data_home: &File,
+) -> Result<CacheClearResult, io::Error> {
+    let Some(keyring) = identity_cache_keyring(data_home, false)? else {
+        return Ok(CacheClearResult::AlreadyClear);
     };
-    keyring_unlink(keyring, USER_SESSION_KEYRING)
+    keyring_unlink(keyring, USER_SESSION_KEYRING)?;
+    Ok(CacheClearResult::Cleared)
 }
 
 fn keyring_syscall_result(result: libc::c_long) -> Result<libc::c_long, io::Error> {
@@ -655,7 +813,7 @@ fn read_private_file(dir: &File, name: &str, max_size: usize) -> Result<Vec<u8>,
     })?;
     let file = File::from(fd);
     ensure_regular_file(&file, name)?;
-    set_file_mode(&file, PRIVATE_FILE_MODE, name)?;
+    verify_file_mode(&file, PRIVATE_FILE_MODE, name)?;
     let metadata = fstat(&file).map_err(|source| io_error(&format!("inspect {name}"), source))?;
     if metadata.st_size < 0 || metadata.st_size as u64 > max_size as u64 {
         return Err(format!("vault: {name} exceeds the maximum file size"));
@@ -680,15 +838,11 @@ fn initialize_store(
     let result = populate_staging_directory(&stage, name, value, passphrase);
     if let Err(primary) = result {
         drop(stage);
-        return Err(cleanup_failure(data, &stage_name, primary));
+        return Err(primary);
     }
     if let Err(source) = renameat_with(data, &stage_name, data, STORE_NAME, RenameFlags::NOREPLACE) {
         drop(stage);
-        return Err(cleanup_failure(
-            data,
-            &stage_name,
-            io_error("publish initialized Linux store", source),
-        ));
+        return Err(io_error("publish initialized Linux store", source));
     }
     fsync(data).map_err(|source| io_error("sync XDG data directory", source))?;
     drop(stage);
@@ -734,7 +888,7 @@ fn create_staging_directory(data: &File) -> Result<(String, File), String> {
                     });
                 return match result {
                     Ok(dir) => Ok((name, dir)),
-                    Err(primary) => Err(cleanup_failure(data, &name, primary)),
+                    Err(primary) => Err(primary),
                 };
             }
             Err(Errno::EXIST) => continue,
@@ -742,93 +896,6 @@ fn create_staging_directory(data: &File) -> Result<(String, File), String> {
         }
     }
     Err("vault: could not allocate an initialization directory".to_owned())
-}
-
-fn cleanup_failure(data: &File, name: &str, primary: String) -> String {
-    match remove_staging_directory(data, name) {
-        Ok(()) => primary,
-        Err(cleanup) => format!("{primary}; initialization cleanup failed: {cleanup}"),
-    }
-}
-
-fn cleanup_staging_directories(data: &File) -> Result<(), String> {
-    let names = directory_names(data)?;
-    for name in names {
-        if !name.to_bytes().starts_with(INIT_PREFIX.as_bytes()) {
-            continue;
-        }
-        let stat = match statat(data, &name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(Errno::NOENT) => continue,
-            Err(source) => return Err(io_error("inspect abandoned initialization", source)),
-        };
-        if FileType::from_raw_mode(stat.st_mode).is_dir() {
-            remove_staging_directory(data, name.to_str().map_err(|_| "vault: invalid initialization path".to_owned())?)?;
-        }
-    }
-    Ok(())
-}
-
-fn remove_staging_directory(data: &File, name: &str) -> Result<(), String> {
-    match statat(data, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) if FileType::from_raw_mode(stat.st_mode).is_dir() => {}
-        Ok(_) => return Err("vault: initialization path is not a directory".to_owned()),
-        Err(Errno::NOENT) => return Ok(()),
-        Err(source) => return Err(io_error("inspect initialization directory", source)),
-    }
-    let stage = open_directory_at(data, name, "abandoned initialization directory")?;
-    let secrets = match statat(&stage, SECRETS_NAME, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) if FileType::from_raw_mode(stat.st_mode).is_dir() => {
-            Some(open_directory_at(&stage, SECRETS_NAME, "staged secrets directory")?)
-        }
-        Ok(_) => {
-            unlinkat(&stage, SECRETS_NAME, AtFlags::empty())
-                .map_err(|source| io_error("remove staged secrets entry", source))?;
-            None
-        }
-        Err(Errno::NOENT) => None,
-        Err(source) => return Err(io_error("inspect staged secrets entry", source)),
-    };
-    if let Some(secrets) = secrets {
-        remove_directory_entries(&secrets, "staged secret")?;
-        drop(secrets);
-        unlinkat(&stage, SECRETS_NAME, AtFlags::REMOVEDIR)
-            .map_err(|source| io_error("remove staged secrets directory", source))?;
-    }
-    remove_directory_entries(&stage, "staged initialization file")?;
-    drop(stage);
-    unlinkat(data, name, AtFlags::REMOVEDIR)
-        .map_err(|source| io_error("remove initialization directory", source))
-}
-
-fn remove_directory_entries(dir: &File, label: &str) -> Result<(), String> {
-    let names = directory_names(dir)?;
-    for name in names {
-        let stat = statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|source| io_error(&format!("inspect {label}"), source))?;
-        if FileType::from_raw_mode(stat.st_mode).is_dir() {
-            return Err(format!("vault: unexpected nested directory in {label}"));
-        }
-        unlinkat(dir, &name, AtFlags::empty())
-            .map_err(|source| io_error(&format!("remove {label}"), source))?;
-    }
-    Ok(())
-}
-
-fn cleanup_temporary_files(secrets: &File) -> Result<(), String> {
-    let names = directory_names(secrets)?;
-    for name in names {
-        if name.to_bytes().starts_with(TEMP_PREFIX.as_bytes()) {
-            let stat = statat(secrets, &name, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(|source| io_error("inspect abandoned temporary file", source))?;
-            if FileType::from_raw_mode(stat.st_mode).is_dir() {
-                return Err("vault: unexpected directory in secrets store".to_owned());
-            }
-            unlinkat(secrets, &name, AtFlags::empty())
-                .map_err(|source| io_error("remove abandoned temporary file", source))?;
-        }
-    }
-    Ok(())
 }
 
 fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), String> {
@@ -839,6 +906,12 @@ fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), St
         }
         Ok(stat) if stat.st_nlink != 1 => {
             return Err(format!("vault: {destination} has an unexpected hard link"));
+        }
+        Ok(stat) if stat.st_uid != effective_uid() => {
+            return Err(format!("vault: {destination} has an unexpected owner"));
+        }
+        Ok(stat) if stat.st_mode & 0o7777 != PRIVATE_FILE_MODE => {
+            return Err(format!("vault: {destination} permissions must be {PRIVATE_FILE_MODE:04o}"));
         }
         Ok(_) | Err(Errno::NOENT) => {}
         Err(source) => return Err(io_error(&format!("inspect {destination}"), source)),
@@ -852,17 +925,18 @@ fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), St
             .map_err(|source| io_error(&format!("write {destination}"), source))?;
         fsync(file).map_err(|source| io_error(&format!("sync {destination}"), source))
     })();
-    drop(file);
     if let Err(primary) = write_result {
-        return Err(cleanup_temporary_file(dir, &temporary, primary));
+        return Err(cleanup_temporary_file(dir, &temporary, &file, primary));
     }
     if let Err(source) = renameat_with(dir, temporary.as_str(), dir, destination, RenameFlags::empty()) {
         return Err(cleanup_temporary_file(
             dir,
             &temporary,
+            &file,
             io_error(&format!("replace {destination}"), source),
         ));
     }
+    drop(file);
     fsync(dir).map_err(|source| io_error("sync containing directory", source))
 }
 
@@ -887,10 +961,26 @@ fn create_temporary_file(dir: &File) -> Result<(String, File), String> {
     Err("vault: could not allocate a temporary encrypted file".to_owned())
 }
 
-fn cleanup_temporary_file(dir: &File, name: &str, primary: String) -> String {
+fn cleanup_temporary_file(dir: &File, name: &str, file: &File, primary: String) -> String {
+    let opened = match fstat(file) {
+        Ok(stat) => stat,
+        Err(cleanup) => return format!("{primary}; temporary file cleanup failed: {cleanup}"),
+    };
+    let entry = match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(entry) => entry,
+        Err(Errno::NOENT) => return primary,
+        Err(cleanup) => return format!("{primary}; temporary file cleanup failed: {cleanup}"),
+    };
+    if !FileType::from_raw_mode(entry.st_mode).is_file()
+        || entry.st_dev != opened.st_dev
+        || entry.st_ino != opened.st_ino
+        || entry.st_nlink != 1
+        || entry.st_uid != effective_uid()
+    {
+        return format!("{primary}; temporary file cleanup skipped because the entry changed");
+    }
     match unlinkat(dir, name, AtFlags::empty()) {
-        Ok(()) => primary,
-        Err(Errno::NOENT) => primary,
+        Ok(()) | Err(Errno::NOENT) => primary,
         Err(cleanup) => format!("{primary}; temporary file cleanup failed: {cleanup}"),
     }
 }
@@ -960,6 +1050,7 @@ fn io_error(operation: &str, source: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -985,11 +1076,8 @@ mod tests {
 
     impl Drop for TestDir {
         fn drop(&mut self) {
-            if let Ok(Some(data)) = open_data_home(&self.0, false)
-                && let Ok(Some(store)) = open_store(&data)
-                && let Ok(recipient) = read_recipient(&store.root)
-            {
-                let _ = remove_cached_identity(&recipient);
+            if let Ok(Some(data)) = open_data_home(&self.0, false) {
+                let _ = remove_cached_identity(&data);
             }
             let _ = fs::remove_dir_all(&self.0);
         }
@@ -1007,6 +1095,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(prompted, ["Create master passphrase: ", "Confirm master passphrase: "]);
+    }
+
+    fn key_permissions(key: libc::c_int) -> Result<libc::c_uint, io::Error> {
+        let mut description = vec![0u8; 1024];
+        // SAFETY: The key ID is a kernel-issued ID and the output buffer is writable for its declared length.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_DESCRIBE,
+                key,
+                description.as_mut_ptr(),
+                description.len(),
+                0 as libc::c_long,
+            )
+        };
+        let length = usize::try_from(keyring_syscall_result(result)?)
+            .map_err(|_| io::Error::other("kernel returned an invalid key description length"))?;
+        description.truncate(length);
+        let description = std::str::from_utf8(&description)
+            .map_err(|_| io::Error::other("kernel returned a non-UTF-8 key description"))?;
+        let permissions = description
+            .split(';')
+            .nth(3)
+            .ok_or_else(|| io::Error::other("kernel returned an incomplete key description"))?;
+        u32::from_str_radix(permissions, 16)
+            .map_err(|_| io::Error::other("kernel returned invalid key permissions"))
     }
 
     fn unlock(value: &'static str) -> impl FnOnce(PassphrasePrompt) -> Result<SecretString, String> {
@@ -1036,6 +1150,79 @@ mod tests {
     }
 
     #[test]
+    fn xdg_path_walk_rejects_symlinks_and_untrusted_modes_without_changing_them() {
+        let temp = TestDir::new();
+        let outside = TestDir::new();
+        let link = temp.path().join("linked");
+        symlink(outside.path(), &link).unwrap();
+        assert!(open_data_home(&link.join("vault-data"), true).is_err());
+        assert!(!outside.path().join("vault-data").exists());
+
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(open_data_home(temp.path(), false).is_err());
+        assert_eq!(fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777, 0o777);
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
+
+        let public_data_home = temp.path().join("public-data");
+        fs::create_dir(&public_data_home).unwrap();
+        fs::set_permissions(&public_data_home, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(open_data_home(&public_data_home, false).unwrap().is_some());
+        assert_eq!(fs::metadata(public_data_home).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+
+    #[test]
+    fn set_preserves_unrelated_initialization_and_temporary_paths() {
+        let temp = TestDir::new();
+        let unrelated_stage = temp.path().join(".vault-init-user-data");
+        fs::create_dir(&unrelated_stage).unwrap();
+        fs::write(unrelated_stage.join("keep"), b"keep me").unwrap();
+        initialize(temp.path());
+
+        let secrets = temp.path().join(STORE_NAME).join(SECRETS_NAME);
+        let unrelated_temp = secrets.join(".tmp-user-data");
+        fs::write(&unrelated_temp, b"keep this too").unwrap();
+        set_secret_at(temp.path(), "SECOND", b"second", &mut |_| {
+            panic!("initialized writes do not prompt")
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(unrelated_stage.join("keep")).unwrap(), b"keep me");
+        assert_eq!(fs::read(unrelated_temp).unwrap(), b"keep this too");
+    }
+
+    #[test]
+    fn existing_vault_permissions_are_rejected_without_chmod() {
+        let temp = TestDir::new();
+        initialize(temp.path());
+        let root = temp.path().join(STORE_NAME);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(list_secrets_at(temp.path()).is_err());
+        assert_eq!(fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o755);
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
+
+        let identity = root.join(IDENTITY_NAME);
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o644)).unwrap();
+        let data = open_data_home(temp.path(), false).unwrap().unwrap();
+        let store = open_store(&data).unwrap().unwrap();
+        assert!(read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT).is_err());
+        assert_eq!(fs::metadata(&identity).unwrap().permissions().mode() & 0o777, 0o644);
+        fs::set_permissions(&identity, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+    }
+
+    #[test]
+    fn planted_lock_file_is_ignored_without_chmod_or_truncation() {
+        let temp = TestDir::new();
+        let lock = temp.path().join(".vault.lock");
+        fs::write(&lock, b"unrelated data").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+
+        initialize(temp.path());
+
+        assert_eq!(fs::read(&lock).unwrap(), b"unrelated data");
+        assert_eq!(fs::metadata(lock).unwrap().permissions().mode() & 0o777, 0o644);
+    }
+
+    #[test]
     fn first_set_encrypts_standard_age_files_and_later_sets_do_not_prompt() {
         let temp = TestDir::new();
         initialize(temp.path());
@@ -1062,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn unlocked_identity_is_reused_without_another_passphrase_prompt() {
+    fn identity_cache_permissions_expiry_refresh_and_revocation_are_enforced() {
         let temp = TestDir::new();
         initialize(temp.path());
         let data = open_data_home(temp.path(), false).unwrap().unwrap();
@@ -1070,11 +1257,84 @@ mod tests {
         let recipient = read_recipient(&store.root).unwrap();
 
         assert_eq!(
-            get_secrets_at(temp.path(), &["TOKEN"], unlock("a passphrase with spaces")).unwrap(),
+            get_secrets_at_with_warning(
+                temp.path(),
+                &["TOKEN"],
+                unlock("a passphrase with spaces"),
+                |_| Ok(()),
+            )
+            .unwrap(),
             ["first"]
         );
 
-        let expect_prompt = !matches!(read_cached_identity(&recipient), Ok(Some(_)));
+        let keyring = match identity_cache_keyring(&data, false) {
+            Ok(Some(keyring)) => keyring,
+            Ok(None) => {
+                eprintln!("skipped keyring assertions: kernel identity cache is unavailable");
+                return;
+            }
+            Err(error) => {
+                eprintln!("skipped keyring assertions: {error}");
+                return;
+            }
+        };
+        let key = match search_keyring(keyring, c"user", c"identity") {
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                eprintln!("skipped keyring assertions: cached identity is unavailable");
+                return;
+            }
+            Err(error) => {
+                eprintln!("skipped keyring assertions: {error}");
+                return;
+            }
+        };
+        assert_eq!(key_permissions(keyring).unwrap(), CACHE_KEYRING_POSSESSOR_PERMISSIONS);
+        assert_eq!(key_permissions(key).unwrap(), CACHE_KEY_POSSESSOR_PERMISSIONS);
+        let timeout = match identity_cache_timeout(key) {
+            Ok(timeout) => timeout,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                eprintln!("skipped key timeout query: {error}");
+                return;
+            }
+            Err(error) => panic!("cannot inspect identity cache timeout: {error}"),
+        };
+        assert!(!timeout.is_zero() && timeout <= IDENTITY_CACHE_TTL);
+        assert!(read_cached_identity(&data, &recipient).unwrap().is_some());
+
+        let encrypted_identity =
+            read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT).unwrap();
+        atomic_write(&store.root, IDENTITY_NAME, b"replacement identity ciphertext").unwrap();
+        assert_eq!(
+            get_secrets_at(temp.path(), &["TOKEN"], |_| {
+                panic!("replacing identity.age does not revoke the cached identity")
+            })
+            .unwrap(),
+            ["first"]
+        );
+        atomic_write(&store.root, IDENTITY_NAME, &encrypted_identity).unwrap();
+
+        set_key_timeout(key, Duration::from_secs(1)).unwrap();
+        let mut prompted = false;
+        assert_eq!(
+            get_secrets_at(temp.path(), &["TOKEN"], |_| {
+                prompted = true;
+                panic!("a cached identity must not prompt")
+            })
+            .unwrap(),
+            ["first"]
+        );
+        assert!(!prompted);
+        assert!(identity_cache_timeout(key).unwrap() > Duration::from_secs(800));
+
+        set_key_timeout(key, Duration::from_secs(1)).unwrap();
+        thread::sleep(Duration::from_secs(2));
+        assert!(read_cached_identity(&data, &recipient).unwrap().is_none());
         let mut prompted = false;
         assert_eq!(
             get_secrets_at(temp.path(), &["TOKEN"], |_| {
@@ -1084,7 +1344,86 @@ mod tests {
             .unwrap(),
             ["first"]
         );
-        assert_eq!(prompted, expect_prompt);
+        assert!(prompted);
+
+        assert!(matches!(
+            remove_cached_identity(&data).unwrap(),
+            CacheClearResult::Cleared
+        ));
+        assert!(read_cached_identity(&data, &recipient).unwrap().is_none());
+        assert!(matches!(
+            remove_cached_identity(&data).unwrap(),
+            CacheClearResult::AlreadyClear
+        ));
+    }
+
+    #[test]
+    fn failed_cache_warning_output_does_not_change_the_read_result() {
+        let mut warning_called = false;
+        report_cache_warning(
+            &mut |_| {
+                warning_called = true;
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed stderr"))
+            },
+            "keyring unavailable",
+        );
+        assert!(warning_called);
+    }
+
+    #[test]
+    fn cache_clear_is_store_scoped_and_recipient_replacement_does_not_hide_stale_cache() {
+        let first = TestDir::new();
+        let second = TestDir::new();
+        initialize(first.path());
+        initialize(second.path());
+        assert_eq!(
+            get_secrets_at(first.path(), &["TOKEN"], unlock("a passphrase with spaces")).unwrap(),
+            ["first"]
+        );
+        assert_eq!(
+            get_secrets_at(second.path(), &["TOKEN"], unlock("a passphrase with spaces")).unwrap(),
+            ["first"]
+        );
+
+        let first_store = open_store(&open_data_home(first.path(), false).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let original_recipient = read_recipient(&first_store.root).unwrap();
+        let replacement_identity = age::x25519::Identity::generate();
+        let replacement_recipient = replacement_identity.to_public();
+        let recipient_text = format!("{replacement_recipient}\n");
+        atomic_write(&first_store.root, RECIPIENT_NAME, recipient_text.as_bytes()).unwrap();
+
+        let first_data = open_data_home(first.path(), false).unwrap().unwrap();
+        let second_data = open_data_home(second.path(), false).unwrap().unwrap();
+        let cache_available = matches!(identity_cache_keyring(&first_data, false), Ok(Some(_)))
+            && matches!(identity_cache_keyring(&second_data, false), Ok(Some(_)));
+        if cache_available {
+            assert!(read_cached_identity(&first_data, &original_recipient).unwrap().is_some());
+            assert!(read_cached_identity(&first_data, &replacement_recipient).unwrap().is_none());
+        }
+        set_secret_at(first.path(), "REDIRECTED", b"redirected value", &mut |_| {
+            panic!("recipient-based writes do not unlock the identity")
+        })
+        .unwrap();
+        let redirected = read_private_file(&first_store.secrets, "REDIRECTED.age", MAX_SECRET_CIPHERTEXT).unwrap();
+        assert_eq!(age::decrypt(&replacement_identity, &redirected).unwrap(), b"redirected value");
+
+        if cache_available {
+            assert!(matches!(
+                remove_cached_identity(&first_data).unwrap(),
+                CacheClearResult::Cleared
+            ));
+            assert!(read_cached_identity(&first_data, &original_recipient).unwrap().is_none());
+
+            let second_store = open_store(&open_data_home(second.path(), false).unwrap().unwrap())
+                .unwrap()
+                .unwrap();
+            let second_recipient = read_recipient(&second_store.root).unwrap();
+            assert!(read_cached_identity(&second_data, &second_recipient).unwrap().is_some());
+        } else {
+            eprintln!("skipped cache scope assertions: kernel identity cache is unavailable");
+        }
     }
 
     #[test]
@@ -1235,7 +1574,6 @@ mod tests {
             assert_eq!(fs::metadata(directory).unwrap().permissions().mode() & 0o777, PRIVATE_DIRECTORY_MODE);
         }
         for file in [
-            temp.path().join(LOCK_NAME),
             root.join(IDENTITY_NAME),
             root.join(RECIPIENT_NAME),
             secrets.join("TOKEN.age"),

@@ -4,10 +4,9 @@
 
 ## Install
 
-Run `make install` from a repository checkout. It uses the pinned Rust nightly
-and `rust-src`. The default path is `~/usr/bin/vault`; set `PREFIX` to change
-it. macOS also requires the Command Line Tools and Swift. Installation signs
-the binary ad hoc by default; set `SIGN_ID` to use another signing identity.
+Download the `vault-<version>-<target>` executable for your platform from
+[GitHub Releases](https://github.com/laputa-systems/vault/releases) and put it
+on your `PATH`.
 
 ## Store and retrieve secrets
 
@@ -69,18 +68,24 @@ of inactivity. Losing the passphrase makes that store unrecoverable.
 
 The default store is `$HOME/.local/share/vault`, or `$XDG_DATA_HOME/vault` when
 `XDG_DATA_HOME` is absolute. Back up the complete directory and retain the
-passphrase separately.
+passphrase separately. `vault lock` removes this store's cached identity from
+the user-session keyring. Replacing or rewrapping `identity.age` does not
+revoke an identity already in the cache.
 
 ## Limits
 
 Secret values are limited to 16 MiB. Secret names and public recipient metadata
 are visible. On macOS, another same-user process can copy the opaque sidecar and
-request its own device-owner authentication. After unlock, the age identity
-exists briefly in vault's memory. On Linux, a process that can read the
-per-user keyring can use the cached identity until it expires. Removing a
-secret does not securely erase storage media. `get` prints secrets to stdout;
-exec mode places them in child environment variables, which other same-user
-processes may be able to inspect.
+request its own device-owner authentication. On Linux, the user-session
+keyring is shared across independent sessions for the same UID. A process with
+access can read and retain the complete decrypted identity beyond its
+15-minute keyring timeout. `vault lock` removes the store's keyring link but
+cannot erase copies already made or guarantee physical erasure. A same-user
+process with write access to the Linux store can replace its public recipient
+and redirect later passphrase-free writes. Removing a secret does not securely
+erase storage media. `get` prints secrets to stdout; exec mode places them in
+child environment variables, which other same-user processes may be able to
+inspect.
 
 Run `vault --help` for the command summary.
 
