@@ -1105,6 +1105,7 @@ fn io_error(operation: &str, source: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use age::Decryptor;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::{Arc, Barrier};

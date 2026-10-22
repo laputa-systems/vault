@@ -7,7 +7,6 @@ OS := $(shell uname -s)
 MUSL_LINK_FLAGS := $(if $(findstring linux-musl,$(TARGET)),-C link-arg=-fuse-ld=mold,)
 
 lint:
-	cargo fmt --all
 	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
 install: dist
