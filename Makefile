@@ -2,7 +2,7 @@ NAME   := vault
 TARGET := $(shell rustc -vV | awk '/^host:/ {print $$2}')
 PREFIX ?= $(HOME)/usr
 
-SIGN_ID ?= Vault Signing
+SIGN_ID ?= -
 OS := $(shell uname -s)
 
 lint:

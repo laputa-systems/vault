@@ -1,5 +1,11 @@
 use age::secrecy::{ExposeSecret, SecretString};
-use age::{Decryptor, Encryptor};
+use age::Decryptor;
+use crate::store::{
+    MAX_IDENTITY_CIPHERTEXT, MAX_IDENTITY_PLAINTEXT, MAX_RECIPIENT_BYTES,
+    MAX_SECRET_CIPHERTEXT, MAX_SECRET_BYTES,
+    decrypt_identity, decrypt_secret, encrypt_identity, encrypt_secret, parse_recipient,
+    validate_identity_recipient, validate_name,
+};
 use rustix::fs::{
     AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, fchmod, flock,
     fsync, fstat, mkdirat, openat, renameat_with, statat, unlinkat,
@@ -12,13 +18,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-const MAX_SECRET_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SECRET_CIPHERTEXT: usize = MAX_SECRET_BYTES + 1024 * 1024;
-const MAX_IDENTITY_CIPHERTEXT: usize = 1024 * 1024;
-const MAX_IDENTITY_PLAINTEXT: usize = 1024;
-const MAX_RECIPIENT_BYTES: usize = 256;
 const STORE_NAME: &str = "vault";
 const SECRETS_NAME: &str = "secrets";
 const LOCK_NAME: &str = ".vault.lock";
@@ -154,7 +155,7 @@ fn set_secret_at(
     if let Some(store) = open_store(&data)? {
         let recipient = validate_store_for_write(&store)?;
         cleanup_temporary_files(&store.secrets)?;
-        let ciphertext = age::encrypt(&recipient, value)
+        let ciphertext = encrypt_secret(&recipient, value)
             .map_err(|_| format!("vault: {name}: encryption failed"))?;
         if ciphertext.len() > MAX_SECRET_CIPHERTEXT {
             return Err(format!("vault: {name}: encrypted secret exceeds the storage limit"));
@@ -207,9 +208,7 @@ fn get_secrets_at_with_warning(
             decrypt_identity(&encrypted_identity, prompt(PassphrasePrompt::Unlock)?)?
         }
     };
-    if identity.to_public().to_string() != recipient.to_string() {
-        return Err("vault: recipient does not match the encrypted identity".to_owned());
-    }
+    validate_identity_recipient(&identity, &recipient)?;
 
     let mut values = Vec::with_capacity(ciphertexts.len());
     for (name, ciphertext) in names.iter().zip(ciphertexts) {
@@ -385,18 +384,7 @@ fn validate_store_for_write(store: &Store) -> Result<age::x25519::Recipient, Str
 fn read_recipient(root: &File) -> Result<age::x25519::Recipient, String> {
     let bytes = read_private_file(root, RECIPIENT_NAME, MAX_RECIPIENT_BYTES)
         .map_err(|error| format!("vault: cannot read public recipient: {error}"))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| "vault: public recipient is not valid UTF-8".to_owned())?;
-    let address = text.strip_suffix('\n').unwrap_or(text);
-    if address.is_empty() || address.contains('\n') || address.contains('\r') {
-        return Err("vault: public recipient is malformed".to_owned());
-    }
-    let recipient = age::x25519::Recipient::from_str(address)
-        .map_err(|_| "vault: public recipient is not a valid age X25519 recipient".to_owned())?;
-    if recipient.to_string() != address {
-        return Err("vault: public recipient is not in canonical form".to_owned());
-    }
-    Ok(recipient)
+    parse_recipient(&bytes)
 }
 
 fn report_cache_warning(
@@ -682,67 +670,6 @@ fn read_private_file(dir: &File, name: &str, max_size: usize) -> Result<Vec<u8>,
     Ok(contents)
 }
 
-fn decrypt_identity(
-    encrypted: &[u8],
-    passphrase: SecretString,
-) -> Result<age::x25519::Identity, String> {
-    let decryptor = Decryptor::new_buffered(encrypted)
-        .map_err(|_| "vault: encrypted identity is malformed".to_owned())?;
-    let identity = age::scrypt::Identity::new(passphrase);
-    let reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|_| "vault: master passphrase is incorrect or the encrypted identity is damaged".to_owned())?;
-    let mut plaintext = Zeroizing::new(Vec::new());
-    reader
-        .take(MAX_IDENTITY_PLAINTEXT as u64 + 1)
-        .read_to_end(&mut plaintext)
-        .map_err(|_| "vault: encrypted identity is damaged".to_owned())?;
-    if plaintext.len() > MAX_IDENTITY_PLAINTEXT {
-        return Err("vault: decrypted identity exceeds the maximum size".to_owned());
-    }
-    let identity_text = match String::from_utf8(std::mem::take(&mut *plaintext)) {
-        Ok(text) => SecretString::from(text),
-        Err(error) => {
-            let mut bytes = error.into_bytes();
-            bytes.zeroize();
-            return Err("vault: decrypted identity is not valid UTF-8".to_owned());
-        }
-    };
-    let line = identity_text.expose_secret().strip_suffix('\n').unwrap_or(identity_text.expose_secret());
-    if line.contains('\n') || line.contains('\r') {
-        return Err("vault: decrypted identity has an invalid format".to_owned());
-    }
-    age::x25519::Identity::from_str(line)
-        .map_err(|_| "vault: decrypted identity is not a valid age X25519 identity".to_owned())
-}
-
-fn decrypt_secret(
-    identity: &age::x25519::Identity,
-    encrypted: &[u8],
-) -> Result<Zeroizing<String>, String> {
-    let decryptor = Decryptor::new_buffered(encrypted)
-        .map_err(|_| "invalid age ciphertext".to_owned())?;
-    let reader = decryptor
-        .decrypt(std::iter::once(identity as &dyn age::Identity))
-        .map_err(|_| "no matching recipient".to_owned())?;
-    let mut plaintext = Zeroizing::new(Vec::new());
-    reader
-        .take(MAX_SECRET_BYTES as u64 + 1)
-        .read_to_end(&mut plaintext)
-        .map_err(|_| "age ciphertext authentication failed".to_owned())?;
-    if plaintext.len() > MAX_SECRET_BYTES {
-        return Err("decrypted secret exceeds the size limit".to_owned());
-    }
-    match String::from_utf8(std::mem::take(&mut *plaintext)) {
-        Ok(value) => Ok(Zeroizing::new(value)),
-        Err(error) => {
-            let mut bytes = error.into_bytes();
-            bytes.zeroize();
-            Err("decrypted secret is not valid UTF-8".to_owned())
-        }
-    }
-}
-
 fn initialize_store(
     data: &File,
     name: &str,
@@ -788,26 +715,11 @@ fn populate_staging_directory(
         .map_err(|source| io_error("create secrets directory", source))?;
     let secrets = open_directory_at(stage, SECRETS_NAME, "secrets directory")?;
     set_directory_mode(&secrets, PRIVATE_DIRECTORY_MODE, "secrets directory")?;
-    let ciphertext = age::encrypt(&recipient, value)
+    let ciphertext = encrypt_secret(&recipient, value)
         .map_err(|_| format!("vault: {name}: encryption failed"))?;
     atomic_write(&secrets, &secret_filename(name), &ciphertext)?;
     fsync(&secrets).map_err(|source| io_error("sync secrets directory", source))?;
     fsync(stage).map_err(|source| io_error("sync initialized store", source))
-}
-
-fn encrypt_identity(plaintext: &[u8], passphrase: SecretString) -> Result<Vec<u8>, String> {
-    let encryptor = Encryptor::with_user_passphrase(passphrase);
-    let mut ciphertext = Vec::new();
-    let mut writer = encryptor
-        .wrap_output(&mut ciphertext)
-        .map_err(|source| io_error("encrypt private identity", source))?;
-    writer
-        .write_all(plaintext)
-        .map_err(|source| io_error("encrypt private identity", source))?;
-    writer
-        .finish()
-        .map_err(|source| io_error("finish encrypted identity", source))?;
-    Ok(ciphertext)
 }
 
 fn create_staging_directory(data: &File) -> Result<(String, File), String> {
@@ -1020,21 +932,6 @@ fn directory_names(dir: &File) -> Result<Vec<CString>, String> {
         }
     }
     Ok(names)
-}
-
-fn validate_name(name: &str) -> Result<(), String> {
-    let bytes = name.as_bytes();
-    let Some(first) = bytes.first() else {
-        return Err("vault: empty name not allowed".to_owned());
-    };
-    if !(first.is_ascii_alphabetic() || *first == b'_')
-        || !bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-    {
-        return Err(format!("vault: invalid secret name {name:?}"));
-    }
-    Ok(())
 }
 
 fn validate_filename(filename: &str) -> Result<(), String> {

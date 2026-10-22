@@ -4,9 +4,16 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
+use age::secrecy::SecretString;
+use zeroize::Zeroize;
 
 #[cfg(target_os = "macos")]
-use vault::keychain as storage;
+mod macos;
+
+#[cfg(target_os = "macos")]
+mod secure_enclave;
+
+mod store;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -14,14 +21,10 @@ mod linux;
 #[cfg(target_os = "linux")]
 use crate::linux as storage;
 
-#[cfg(target_os = "linux")]
-use age::secrecy::SecretString;
-
-#[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
 
-#[cfg(target_os = "linux")]
-use zeroize::Zeroize;
+#[cfg(target_os = "macos")]
+use crate::macos as storage;
 
 const USAGE: &str = "\
   vault — secret manager
@@ -34,6 +37,8 @@ Usage:
   vault rm    <NAME>            Delete a secret
   vault ls                      List all stored secret names
   vault purge                   Delete every secret vault manages
+
+  vault recover                 Rewrap the age identity with a new Secure Enclave key
 
   vault [ENV ...] -- <CMD> [ARGS ...]   Run CMD with secrets injected
 
@@ -51,11 +56,13 @@ Examples:
 
 #[cfg(target_os = "macos")]
 const STORAGE_WARNING: &str = concat!(
-    "macOS security warning: vault uses the file-based Keychain in compatibility mode. ",
-    "userPresence enforcement is unverified. The harness read a dummy item with interaction disabled.\n",
+    "macOS storage: new secrets use an age store protected by Secure Enclave hardware (macOS 10.15+). ",
+    "Existing Keychain items remain in compatibility mode until replaced with 'vault set'. ",
+    "Their userPresence enforcement is unverified; an isolated file-Keychain item was readable without interaction. ",
+    "The recovery identity uses a separate passphrase. Device-owner authentication may use Touch ID or the Mac password.\n",
 );
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 const STORAGE_WARNING: &str = "";
 
 static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -97,7 +104,6 @@ enum CliError {
         read: Box<CliError>,
         restore: Box<CliError>,
     },
-    #[cfg(target_os = "linux")]
     TerminalReadAndPromptOutput {
         read: Box<CliError>,
         output: io::Error,
@@ -142,7 +148,6 @@ impl fmt::Display for CliError {
             Self::TerminalReadAndRestore { read, restore } => {
                 write!(f, "vault: {read}; terminal restoration also failed: {restore}")
             }
-            #[cfg(target_os = "linux")]
             Self::TerminalReadAndPromptOutput { read, output } => {
                 write!(f, "vault: {read}; passphrase prompt output also failed: {output}")
             }
@@ -175,7 +180,6 @@ impl std::error::Error for CliError {
             Self::Wait { source, .. } => Some(source),
             Self::TerminalSettings { source, .. } => Some(source),
             Self::TerminalReadAndRestore { read, .. } => Some(read),
-            #[cfg(target_os = "linux")]
             Self::TerminalReadAndPromptOutput { read, .. } => Some(read),
             Self::SignalSetup { source, .. } => Some(source),
             Self::InvalidInput(_)
@@ -227,6 +231,11 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
         }
         "purge" => {
             cmd_purge(&args[1..])?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(target_os = "macos")]
+        "recover" => {
+            cmd_recover(&args[1..])?;
             Ok(ExitCode::SUCCESS)
         }
         "-h" | "--help" | "help" => {
@@ -291,7 +300,7 @@ fn cmd_set(args: &[String], silent: bool) -> Result<(), CliError> {
 
 #[cfg(target_os = "macos")]
 fn store_secret(name: &str, value: &[u8]) -> Result<(), String> {
-    storage::set_secret(name, value)
+    storage::set_secret(name, value, prompt_recovery_passphrase)
 }
 
 #[cfg(target_os = "linux")]
@@ -306,11 +315,8 @@ fn persist_secret(
 ) -> Result<(), CliError> {
     let value = read_value?;
     let result = store(name, value.as_bytes());
-    #[cfg(target_os = "linux")]
-    {
-        let mut value = value;
-        value.zeroize();
-    }
+    let mut value = value;
+    value.zeroize();
     result.map_err(CliError::Storage)
 }
 
@@ -318,11 +324,8 @@ fn cmd_get(args: &[String]) -> Result<(), CliError> {
     let name = require_exact_name(args, "get")?;
     let value = get_secret(name)?;
     let result = write_stdout(value.as_bytes()).and_then(|()| write_stdout(b"\n"));
-    #[cfg(target_os = "linux")]
-    {
-        let mut value = value;
-        value.zeroize();
-    }
+    let mut value = value;
+    value.zeroize();
     result
 }
 
@@ -353,6 +356,13 @@ fn cmd_ls(args: &[String]) -> Result<(), CliError> {
 
 fn cmd_purge(args: &[String]) -> Result<(), CliError> {
     cmd_purge_with(args, storage::purge_secrets)
+}
+
+#[cfg(target_os = "macos")]
+fn cmd_recover(args: &[String]) -> Result<(), CliError> {
+    require_no_args(args, "recover")?;
+    storage::recover(prompt_recovery_passphrase).map_err(CliError::Storage)?;
+    write_stdout(b"Secure Enclave identity recovered\n")
 }
 
 fn cmd_purge_with(
@@ -400,10 +410,7 @@ enum ExecEnv<'a> {
 
 #[cfg(target_os = "macos")]
 fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
-    names
-        .iter()
-        .map(|name| storage::get_secret(name).map_err(CliError::Storage))
-        .collect()
+    storage::get_secrets(names).map_err(CliError::Storage)
 }
 
 #[cfg(target_os = "linux")]
@@ -417,7 +424,12 @@ fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
 
 #[cfg(target_os = "linux")]
 fn prompt_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretString, String> {
-    read_master_passphrase(prompt).map_err(|error| error.to_string())
+    read_passphrase(prompt.prompt(), "master").map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn prompt_recovery_passphrase(prompt: macos::RecoveryPrompt) -> Result<SecretString, String> {
+    read_passphrase(prompt.prompt(), "recovery").map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -484,7 +496,6 @@ fn run_child(
 
     let spawn_result = command.spawn();
     drop(command);
-    #[cfg(target_os = "linux")]
     for (_, value) in environment {
         value.zeroize();
     }
@@ -556,21 +567,19 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn read_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretString, CliError> {
+fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, CliError> {
     let mut tty = OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
         .map_err(|_| {
             CliError::InvalidInput(
-                "vault: a controlling terminal is required to enter the master passphrase"
-                    .to_owned(),
+                format!("vault: a controlling terminal is required to enter the {passphrase_kind} passphrase"),
             )
         })?;
     if !rustix::termios::isatty(&tty) {
         return Err(CliError::InvalidInput(
-            "vault: a controlling terminal is required to enter the master passphrase".to_owned(),
+            format!("vault: a controlling terminal is required to enter the {passphrase_kind} passphrase"),
         ));
     }
 
@@ -579,7 +588,7 @@ fn read_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretStrin
         source,
     })?;
     output
-        .write_all(prompt.prompt().as_bytes())
+        .write_all(prompt.as_bytes())
         .and_then(|()| output.flush())
         .map_err(|source| CliError::Io {
             operation: "write passphrase prompt",

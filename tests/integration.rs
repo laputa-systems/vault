@@ -33,27 +33,24 @@ fn help_flags_show_usage_to_stdout() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_keychain_compatibility_warning_stays_in_help_and_readme() {
+fn macos_secure_enclave_limits_stay_in_help_and_readme() {
     let out = vault(&["--help"]).unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let readme = include_str!("../README.md").replace('\n', " ");
-    let compatibility_mode = "uses the file-based Keychain in compatibility mode";
     assert!(
-        stdout.contains("macOS security warning")
+        stdout.contains("Secure Enclave hardware (macOS 10.15+)")
+            && stdout.contains("Existing Keychain items remain in compatibility mode")
             && stdout.contains("userPresence enforcement is unverified")
-            && stdout.contains("dummy item with interaction disabled")
-            && stdout.contains(compatibility_mode),
-        "CLI help must disclose the unverified file-Keychain policy: {stdout:?}"
+            && stdout.contains("Touch ID or the Mac password"),
+        "CLI help must disclose the protected-storage requirements and limits: {stdout:?}"
     );
     assert!(
-        readme.contains(compatibility_mode),
-        "README must repeat the CLI's compatibility-mode label so its storage warning stays consistent"
-    );
-    assert!(
-        readme.contains("`userPresence` enforcement is unverified")
-            && readme.contains("dummy item with interaction disabled"),
-        "README must preserve the same observed Keychain limitation as CLI help"
+        readme.contains("require macOS 10.15 or later and supported Secure Enclave hardware")
+            && readme.contains("the Secure Enclave identity must first unlock successfully")
+            && readme.contains("`userPresence` enforcement is unverified")
+            && readme.contains("Touch ID or the Mac login password"),
+        "README must describe the same Secure Enclave requirements and compatibility boundary"
     );
 }
 

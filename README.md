@@ -1,16 +1,21 @@
 # vault
 
-`vault` stores secrets and supplies them to child commands. It uses the native
-Keychain on macOS and an age-encrypted local store on Linux.
+`vault` stores secrets and supplies them to child commands. macOS uses an
+age-encrypted local store with a Secure Enclave protected identity; Linux uses
+the same age format with a passphrase-unlocked identity.
 
 ## Build and install
 
 Build with `cargo build`. Run `make install` to build and install the binary at
 `$(HOME)/usr/bin/vault` by default. Set `PREFIX` to change the install prefix.
 
-On macOS, installation signs the binary with `SIGN_ID` (default:
-`Vault Signing`). Set `SIGN_ID` to an available code-signing identity. Linux
-installation is native and does not use macOS signing tools.
+On macOS, installation signs the binary ad hoc by default. Set `SIGN_ID` to a
+code-signing identity to use a different signature. The Secure Enclave design
+does not require an Apple Developer identity, provisioning profile, app bundle,
+or Keychain entitlement. Building it requires the macOS Command Line Tools and
+Swift.
+
+Linux installation is native and does not use macOS signing tools.
 
 ## Store and retrieve secrets
 
@@ -42,29 +47,59 @@ names a stored secret. It starts the command directly, without a shell. The
 child inherits the current environment and standard streams, and `vault`
 returns the child's exit status.
 
-## macOS Keychain
+## macOS Secure Enclave store
 
-**Security warning:** `vault` uses the file-based Keychain in compatibility mode.
-It does not select the Data Protection Keychain. The harness read a dummy item
-with interaction disabled. `userPresence` enforcement is unverified for this
-backend.
+New secrets are encrypted with age to a single X25519 identity. A Swift bridge
+uses CryptoKit to wrap that identity with a Secure Enclave P-256 key protected
+by device-owner authentication. The private P-256 key is not exported. The
+bridge uses CryptoKit instead of persistent Security.framework Keychain items,
+so it needs no provisioning profile or Keychain entitlement. Secure Enclave
+operations require macOS 10.15 or later and supported Secure Enclave hardware.
 
-`set` and `get` continue to use the current file-based Keychain records so
-existing secrets remain usable. New Generic Password items request
-`userPresence` and `WhenUnlockedThisDeviceOnly`. Updating an item changes its
-value without replacing its access policy, which may be weaker. `vault` has no
-migration command.
+The first `vault set` initializes the store and asks for a strong recovery
+passphrase and confirmation. `isset` still reads the secret silently, but
+first-use store creation asks for that recovery passphrase. Later `set`
+operations encrypt with the public age recipient. A `get` or `exec` unwraps
+the identity once per invocation, then reads all requested age ciphertexts.
+macOS device-owner
+authentication may use Touch ID or the Mac login password; `vault` does not
+claim Touch ID exclusively. Cancellation, unavailable hardware, malformed
+sidecars, and authentication failures stop the operation.
 
-`make install` signs a standalone executable with `SIGN_ID`. That signature
-does not authorize the restricted `keychain-access-groups` entitlement. Apple
-requires a provisioning profile to authorize that entitlement and an app-like
-bundle to embed the profile ([TN3137](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains),
-[TN3125](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles)).
-The current package does not provide a proven Data Protection Keychain path.
-A self-signed or ad-hoc signature alone cannot authorize the required access
-group. A local Apple Development profile may be enough without distributing
-the app, but it is unverified whether a free account can create a profile with
-this entitlement. See [Apple's development profile requirements](https://developer.apple.com/help/account/provisioning-profiles/create-a-development-provisioning-profile/).
+The recovery identity is separately encrypted with age and stored as
+`identity.age` beside the Secure Enclave sidecar. Keep a copy of the complete
+store and its recovery passphrase somewhere safe. On this or a replacement Mac,
+`vault recover` uses that passphrase to create a new device-bound Secure Enclave
+key. The opaque `identity.se` sidecar alone is not portable.
+
+The store is under `$XDG_DATA_HOME/vault` when `XDG_DATA_HOME` is absolute;
+otherwise it is under `~/Library/Application Support/vault`. It contains
+`identity.age`, `identity.se`, `recipient`, and encrypted files in `secrets/`.
+New store names may contain any nonempty UTF-8 string up to 125 bytes. Secret
+values stored in the age store are limited to 16 MiB. Secret names and the
+public recipient are visible in the store layout.
+
+Existing current-service file-Keychain items remain as compatibility entries.
+`get` and `exec` can read those entries when no age store exists. With an age
+store present, the Secure Enclave identity must first unlock successfully;
+only a name absent from the age store can then be read from the current
+Keychain service. A corrupt age ciphertext or failed Secure Enclave unlock
+never falls back to Keychain. The compatibility items' `userPresence`
+enforcement is unverified: the isolated harness read a dummy file-Keychain item
+with interaction disabled. `ls` lists both stores. Re-entering a value with
+`vault set NAME` writes the age ciphertext first, then removes the same-name
+Keychain entry. Other Keychain entries remain available until replaced or
+removed. The legacy `dev.joshuarli.vault` namespace is never read; `set`, `rm`,
+and `purge` retain its existing cleanup behavior.
+
+The Secure Enclave sidecar is an opaque file, not an app-identity access
+control. Another process running as the same macOS user can copy it and request
+its own device-owner authentication. After a successful unlock, the age
+identity exists briefly in the `vault` process. A compromised same-user
+process may inspect memory or capture requested secrets. This design protects
+stored ciphertext from offline reading and requires OS-mediated device-owner
+authentication for each new-store read; it does not isolate vault from other
+processes owned by the same user.
 
 ## Linux age store
 

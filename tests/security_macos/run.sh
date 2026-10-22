@@ -135,12 +135,14 @@ if [ "$MODE" = --gate ] || [ "$MODE" = --interactive ]; then
     IDENTITY=$(printf '%s\n' "$IDENTITIES" | awk '
         /^[[:space:]]*[0-9]+\)/ {
             hash = $2
+            if ($0 ~ /"Apple Development:/ && apple_development == "") apple_development = hash
+            if ($0 ~ /"Developer ID Application:/ && developer_id == "") developer_id = hash
             if ($0 ~ /"Vault Signing"/ && vault == "") vault = hash
-            if ($0 ~ /"(Developer ID Application|Apple Development):/ && developer == "") developer = hash
         }
         END {
-            if (vault != "") print vault
-            else if (developer != "") print developer
+            if (apple_development != "") print apple_development
+            else if (developer_id != "") print developer_id
+            else if (vault != "") print vault
         }
     ')
     case "$IDENTITY" in
@@ -177,16 +179,14 @@ if [ "$MODE" = --gate ] || [ "$MODE" = --interactive ]; then
     done
     if [ "$PROFILE_COUNT" -eq 0 ]; then
         printf '%s\n' 'attempt=app-like-profile skipped: no installed .provisionprofile found in the standard per-user Xcode profile directories'
-        printf '%s\n' 'prerequisite=existing provisioning profile authorizing the signing identity and keychain-access-groups entitlement'
+        printf '%s\n' 'prerequisite=existing provisioning profile authorizing the signing identity and macOS application identifier'
     elif [ -z "$IDENTITY" ]; then
         printf 'attempt=app-like-profile skipped: found %s profile file(s), but security find-identity -v -p codesigning reported no valid identity to match them\n' "$PROFILE_COUNT"
     else
         IDENTITY_TEAM=$(codesign --display --verbose=4 "$IDENTITY_BIN" 2>&1 | sed -n 's/^TeamIdentifier=//p')
         PROFILE_TEMP_INDEX=0
         MATCHED_PROFILE=
-        MATCHED_PROFILE_PLIST=
         MATCHED_BUNDLE_ID=
-        MATCHED_ACCESS_GROUP=
         mkdir -p "$PROFILE_SCRATCH"
         for profile_dir in \
             "$HOME/Library/MobileDevice/Provisioning Profiles" \
@@ -203,28 +203,19 @@ if [ "$MODE" = --gate ] || [ "$MODE" = --interactive ]; then
                         continue
                     fi
                     profile_team=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_plist" 2>/dev/null || true)
-                    profile_app_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist" 2>/dev/null || true)
+                    profile_app_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$profile_plist" 2>/dev/null || true)
                     case "$profile_team" in
                         "$IDENTITY_TEAM") ;;
                         *) continue ;;
                     esac
                     case "$profile_app_id" in
-                        "$IDENTITY_TEAM".*) app_suffix=${profile_app_id#"$IDENTITY_TEAM".} ;;
+                        *.*) app_id_prefix=${profile_app_id%%.*}; app_suffix=${profile_app_id#*.} ;;
                         *) continue ;;
                     esac
-                    profile_group=
-                    group_index=0
-                    while [ "$group_index" -lt 32 ]; do
-                        group=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:keychain-access-groups:$group_index" "$profile_plist" 2>/dev/null || true)
-                        if [ -z "$group" ]; then
-                            break
-                        fi
-                        case "$group" in
-                            "$IDENTITY_TEAM".*) profile_group=$group; break ;;
-                        esac
-                        group_index=$((group_index + 1))
-                    done
-                    if [ -z "$profile_group" ]; then
+                    case "$app_id_prefix" in
+                        *[!A-Za-z0-9]*) continue ;;
+                    esac
+                    if [ -z "$app_id_prefix" ]; then
                         continue
                     fi
                     case "$app_suffix" in
@@ -232,28 +223,22 @@ if [ "$MODE" = --gate ] || [ "$MODE" = --interactive ]; then
                         *\*) bundle_prefix=${app_suffix%\*}; bundle_id="${bundle_prefix}vault-security-harness" ;;
                         *) bundle_id=$app_suffix ;;
                     esac
-                    group_suffix=${profile_group#"$IDENTITY_TEAM".}
-                    case "$group_suffix" in
-                        '*') access_group="$IDENTITY_TEAM.$bundle_id" ;;
-                        *\*) group_prefix=${group_suffix%\*}; access_group="$IDENTITY_TEAM.${group_prefix}vault-security-harness" ;;
-                        *) access_group=$profile_group ;;
-                    esac
-                    case "$bundle_id:$access_group" in
+                    private_access_group="$app_id_prefix.$bundle_id"
+                    case "$bundle_id:$private_access_group" in
                         *[!A-Za-z0-9.:-]*|:*) continue ;;
                     esac
                     MATCHED_PROFILE=$profile
-                    MATCHED_PROFILE_PLIST=$profile_plist
                     MATCHED_BUNDLE_ID=$bundle_id
-                    MATCHED_ACCESS_GROUP=$access_group
+                    MATCHED_PRIVATE_ACCESS_GROUP=$private_access_group
                     break 2
                 done
             fi
         done
 
         if [ -z "$MATCHED_PROFILE" ]; then
-            printf 'attempt=app-like-profile parked: no installed profile matched TeamIdentifier %s with an authorized team keychain access group\n' "$IDENTITY_TEAM"
+            printf 'attempt=app-like-profile parked: no installed profile matched TeamIdentifier %s and a macOS application identifier\n' "$IDENTITY_TEAM"
         else
-            printf 'attempt=minimal-app-like-bundle profile-present team=%s bundle-id=%s access-group=%s\n' "$IDENTITY_TEAM" "$MATCHED_BUNDLE_ID" "$MATCHED_ACCESS_GROUP"
+            printf 'attempt=minimal-app-like-bundle profile-present team=%s bundle-id=%s private-access-group=%s\n' "$IDENTITY_TEAM" "$MATCHED_BUNDLE_ID" "$MATCHED_PRIVATE_ACCESS_GROUP"
             mkdir -p "$APP/Contents/MacOS"
             cp "$IDENTITY_BIN" "$APP_BIN"
             cp "$MATCHED_PROFILE" "$APP/Contents/embedded.provisionprofile"
@@ -268,7 +253,7 @@ if [ "$MODE" = --gate ] || [ "$MODE" = --interactive ]; then
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>VaultHarnessAccessGroup</key><string>$MATCHED_ACCESS_GROUP</string>
+<key>VaultHarnessPrivateAccessGroup</key><string>$MATCHED_PRIVATE_ACCESS_GROUP</string>
 </dict>
 </plist>
 EOF
@@ -277,9 +262,8 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-<key>application-identifier</key><string>$IDENTITY_TEAM.$MATCHED_BUNDLE_ID</string>
+<key>com.apple.application-identifier</key><string>${MATCHED_PRIVATE_ACCESS_GROUP}</string>
 <key>com.apple.developer.team-identifier</key><string>$IDENTITY_TEAM</string>
-<key>keychain-access-groups</key><array><string>$MATCHED_ACCESS_GROUP</string></array>
 </dict>
 </plist>
 EOF
@@ -289,7 +273,7 @@ EOF
                     PACKAGE_RUN_ID=$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')
                     PACKAGE_RUN_IDS="$PACKAGE_RUN_IDS $PACKAGE_RUN_ID"
                     "$APP_BIN" suite "$PACKAGE_RUN_ID" "$KEYCHAIN"
-                    "$BIN" cross-identity-read "$PACKAGE_RUN_ID" "$MATCHED_ACCESS_GROUP"
+                    "$BIN" cross-identity-read "$PACKAGE_RUN_ID" "$MATCHED_PRIVATE_ACCESS_GROUP"
                     if [ "$MODE" = --interactive ]; then
                         INTERACTIVE_BIN=$APP_BIN
                         INTERACTIVE_RUN_ID=$PACKAGE_RUN_ID

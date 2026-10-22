@@ -88,17 +88,13 @@ func accessControl(userPresence: Bool) throws -> SecAccessControl {
 }
 
 func baseQuery(_ runID: String, _ suffix: String, _ backend: Backend) -> [String: Any] {
-    var query: [String: Any] = [
+    let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: service,
         kSecAttrAccount as String: account(runID, suffix),
         kSecAttrSynchronizable as String: false,
         kSecUseDataProtectionKeychain as String: backend == .dataProtection
     ]
-    if backend == .dataProtection,
-       let group = Bundle.main.infoDictionary?["VaultHarnessAccessGroup"] as? String {
-        query[kSecAttrAccessGroup as String] = group
-    }
     return query
 }
 
@@ -169,8 +165,8 @@ func printAuthenticationCapabilities() {
 
 func runSuite(_ runID: String, _ keychainPath: String) throws {
     try printSession()
-    if let group = Bundle.main.infoDictionary?["VaultHarnessAccessGroup"] as? String {
-        print("data_protection_access_group=\(group)")
+    if let group = Bundle.main.infoDictionary?["VaultHarnessPrivateAccessGroup"] as? String {
+        print("data_protection_private_access_group=\(group)")
     }
     let fileKeychain = try keychain(keychainPath)
     let fileAdd = try add(runID, "file-default", .file, fileKeychain, protected: false)
@@ -202,7 +198,7 @@ func runSuite(_ runID: String, _ keychainPath: String) throws {
     printStatus("data_protection_add", dpAdd)
     guard dpAdd == errSecSuccess else {
         if dpAdd == errSecMissingEntitlement || dpAdd == errSecNotAvailable {
-            print("data_protection=blocked status=\(statusName(dpAdd))")
+            print("data_protection_probe=blocked status=\(statusName(dpAdd))")
             return
         }
         throw HarnessError.item(dpAdd)
@@ -211,6 +207,7 @@ func runSuite(_ runID: String, _ keychainPath: String) throws {
     let (dpRead, dpMatches) = read(runID, "dp-probe", .dataProtection, nil)
     print("data_protection_query_status=\(statusName(dpRead)) data_matches=\(dpMatches)")
     try expect(dpRead == errSecSuccess && dpMatches, "data protection exact query failed")
+    print("data_protection_probe=success access_group=private-application-identifier")
 
     let (wrongFileRead, _) = read(runID, "dp-probe", .file, fileKeychain)
     printStatus("file_query_for_data_protection_item", wrongFileRead)
@@ -274,8 +271,6 @@ func runInteractive(_ runID: String, _ keychainPath: String) throws {
     print("hardware_model=\(try shellOutput("/usr/sbin/sysctl", ["-n", "hw.model"]))")
     print("macos_version=\(try shellOutput("/usr/bin/sw_vers", ["-productVersion"]))")
     print("architecture=\(try shellOutput("/usr/bin/uname", ["-m"]))")
-    print("signing_identity=ad-hoc")
-
     let one = try add(runID, "dp-interactive-one", .dataProtection, nil, protected: true)
     let two = try add(runID, "dp-interactive-two", .dataProtection, nil, protected: true)
     printStatus("interactive_item_one_add", one)
@@ -339,7 +334,7 @@ func runCrossIdentityRead(_ runID: String, accessGroup: String?) throws {
     try expect(omittedGroupStatus == errSecSuccess || omittedGroupStatus == errSecItemNotFound || omittedGroupStatus == errSecMissingEntitlement || omittedGroupStatus == errSecInteractionNotAllowed || omittedGroupStatus == errSecAuthFailed, "cross-identity query without a group failed unexpectedly")
     guard let accessGroup else { return }
     let (sameGroupStatus, sameGroupMatches) = read(runID, "dp-probe", .dataProtection, nil, context: context, accessGroup: accessGroup)
-    print("ad_hoc_read_same_access_group=\(statusName(sameGroupStatus)) data_matches=\(sameGroupMatches)")
+    print("ad_hoc_read_private_application_id_group=\(statusName(sameGroupStatus)) data_matches=\(sameGroupMatches)")
     if sameGroupStatus == errSecSuccess && sameGroupMatches {
         throw HarnessError.check("ad-hoc executable read the signed item through its exact access group")
     }
