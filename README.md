@@ -48,15 +48,8 @@ The default store is `~/Library/Application Support/vault`, or
 `$XDG_DATA_HOME/vault` when `XDG_DATA_HOME` is absolute. The opaque Secure
 Enclave identity file cannot be used on another Mac by itself. Run
 `vault recover` with the recovery passphrase to create a new device-bound key.
-
-Existing Keychain items remain in compatibility mode. Backups of the age store
-do not include those Keychain items. If an age store exists,
-the Secure Enclave identity must first unlock successfully before vault can
-read a missing age name from Keychain. The compatibility items' `userPresence`
-enforcement is unverified; the isolated harness read a disposable file-Keychain
-item without interaction. `vault set NAME` replaces a same-name compatibility
-item after storing the new encrypted value. On macOS, `ls` includes names from
-both stores.
+Vault no longer reads or writes Keychain items; macOS secrets are available only
+from the age store.
 
 ## Linux storage and recovery
 

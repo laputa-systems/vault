@@ -33,24 +33,23 @@ fn help_flags_show_usage_to_stdout() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_secure_enclave_limits_stay_in_help_and_readme() {
+fn macos_help_and_readme_document_secure_enclave_storage() {
     let out = vault(&["--help"]).unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let readme = include_str!("../README.md").replace('\n', " ");
     assert!(
         stdout.contains("Secure Enclave hardware (macOS 10.15+)")
-            && stdout.contains("Existing Keychain items remain in compatibility mode")
-            && stdout.contains("userPresence enforcement is unverified")
+            && stdout.contains("Recovery uses a separate passphrase")
             && stdout.contains("Touch ID or the Mac password"),
-        "CLI help must disclose the protected-storage requirements and limits: {stdout:?}"
+        "CLI help must disclose Secure Enclave storage and recovery: {stdout:?}"
     );
     assert!(
         readme.contains("require macOS 10.15 or later and supported Secure Enclave hardware")
-            && readme.contains("the Secure Enclave identity must first unlock successfully")
-            && readme.contains("`userPresence` enforcement is unverified")
-            && readme.contains("Touch ID or the Mac login password"),
-        "README must describe the same Secure Enclave requirements and compatibility boundary"
+            && readme.contains("Vault no longer reads or writes Keychain items")
+            && readme.contains("Touch ID or the Mac login password")
+            && readme.contains("Run `vault recover`"),
+        "README must describe Secure Enclave requirements, recovery, and store-only behavior"
     );
 }
 

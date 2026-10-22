@@ -1,5 +1,4 @@
 use age::secrecy::{ExposeSecret, SecretString};
-use age::Decryptor;
 use crate::store::{
     MAX_IDENTITY_CIPHERTEXT, MAX_IDENTITY_PLAINTEXT, MAX_RECIPIENT_BYTES,
     MAX_SECRET_CIPHERTEXT, MAX_SECRET_BYTES,
@@ -473,8 +472,7 @@ fn verify_file_mode(file: &File, expected: u32, label: &str) -> Result<(), Strin
 fn validate_store_for_write(store: &Store) -> Result<age::x25519::Recipient, String> {
     let identity_file = read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT)
         .map_err(|error| format!("vault: Linux store is incomplete or damaged: {error}"))?;
-    Decryptor::new_buffered(&identity_file[..])
-        .map_err(|_| "vault: encrypted identity is malformed".to_owned())?;
+    crate::store::validate_encrypted_identity(&identity_file)?;
     read_recipient(&store.root)
 }
 
@@ -838,11 +836,15 @@ fn initialize_store(
     let result = populate_staging_directory(&stage, name, value, passphrase);
     if let Err(primary) = result {
         drop(stage);
-        return Err(primary);
+        return Err(cleanup_failure(data, &stage_name, primary));
     }
     if let Err(source) = renameat_with(data, &stage_name, data, STORE_NAME, RenameFlags::NOREPLACE) {
         drop(stage);
-        return Err(io_error("publish initialized Linux store", source));
+        return Err(cleanup_failure(
+            data,
+            &stage_name,
+            io_error("publish initialized Linux store", source),
+        ));
     }
     fsync(data).map_err(|source| io_error("sync XDG data directory", source))?;
     drop(stage);
@@ -888,7 +890,7 @@ fn create_staging_directory(data: &File) -> Result<(String, File), String> {
                     });
                 return match result {
                     Ok(dir) => Ok((name, dir)),
-                    Err(primary) => Err(primary),
+                    Err(primary) => Err(cleanup_failure(data, &name, primary)),
                 };
             }
             Err(Errno::EXIST) => continue,
@@ -896,6 +898,59 @@ fn create_staging_directory(data: &File) -> Result<(String, File), String> {
         }
     }
     Err("vault: could not allocate an initialization directory".to_owned())
+}
+
+fn cleanup_failure(data: &File, name: &str, primary: String) -> String {
+    match remove_staging_directory(data, name) {
+        Ok(()) => primary,
+        Err(cleanup) => format!("{primary}; initialization cleanup failed: {cleanup}"),
+    }
+}
+
+fn remove_staging_directory(data: &File, name: &str) -> Result<(), String> {
+    match statat(data, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode).is_dir() => {}
+        Ok(_) => return Err("vault: initialization path is not a directory".to_owned()),
+        Err(Errno::NOENT) => return Ok(()),
+        Err(source) => return Err(io_error("inspect initialization directory", source)),
+    }
+    let stage = open_directory_at(data, name, "abandoned initialization directory")?;
+    let secrets = match statat(&stage, SECRETS_NAME, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode).is_dir() => {
+            Some(open_directory_at(&stage, SECRETS_NAME, "staged secrets directory")?)
+        }
+        Ok(_) => {
+            unlinkat(&stage, SECRETS_NAME, AtFlags::empty())
+                .map_err(|source| io_error("remove staged secrets entry", source))?;
+            None
+        }
+        Err(Errno::NOENT) => None,
+        Err(source) => return Err(io_error("inspect staged secrets entry", source)),
+    };
+    if let Some(secrets) = secrets {
+        remove_directory_entries(&secrets, "staged secret")?;
+        drop(secrets);
+        unlinkat(&stage, SECRETS_NAME, AtFlags::REMOVEDIR)
+            .map_err(|source| io_error("remove staged secrets directory", source))?;
+    }
+    remove_directory_entries(&stage, "staged initialization file")?;
+    drop(stage);
+    unlinkat(data, name, AtFlags::REMOVEDIR)
+        .map_err(|source| io_error("remove initialization directory", source))
+}
+
+fn remove_directory_entries(dir: &File, label: &str) -> Result<(), String> {
+    let names = directory_names(dir)?;
+    for name in names {
+        let stat = statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| io_error(&format!("inspect {label}"), source))?;
+        if FileType::from_raw_mode(stat.st_mode).is_dir() {
+            return Err(format!("vault: unexpected nested directory in {label}"));
+        }
+        unlinkat(dir, &name, AtFlags::empty())
+            .map_err(|source| io_error(&format!("remove {label}"), source))?;
+    }
+    Ok(())
 }
 
 fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), String> {
@@ -1059,11 +1114,15 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "vault-test-{}-{}",
-                std::process::id(),
-                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-            ));
+            let path = std::env::current_dir()
+                .unwrap()
+                .join(".work/tmp")
+                .join(format!(
+                    "vault-test-{}-{}",
+                    std::process::id(),
+                    NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+                ));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::create_dir(&path).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
             Self(path)

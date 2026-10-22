@@ -102,6 +102,15 @@ pub(crate) fn decrypt_identity(
         .map_err(|_| "vault: decrypted identity is not a valid age X25519 identity".to_owned())
 }
 
+pub(crate) fn validate_encrypted_identity(encrypted: &[u8]) -> Result<(), String> {
+    let decryptor = Decryptor::new_buffered(encrypted)
+        .map_err(|_| "vault: encrypted identity is malformed".to_owned())?;
+    if !decryptor.is_scrypt() {
+        return Err("vault: encrypted identity is not passphrase-protected".to_owned());
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_recipient(bytes: &[u8]) -> Result<age::x25519::Recipient, String> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| "vault: public recipient is not valid UTF-8".to_owned())?;
@@ -147,7 +156,7 @@ pub(crate) fn validate_name(name: &str) -> Result<(), String> {
 mod tests {
     use super::{
         decrypt_identity, decrypt_secret, encrypt_identity, encrypt_secret,
-        validate_identity_recipient,
+        validate_encrypted_identity, validate_identity_recipient,
     };
     use age::secrecy::{ExposeSecret, SecretString};
 
@@ -164,6 +173,7 @@ mod tests {
         recovery_plaintext.push(b'\n');
         let recovery_passphrase = SecretString::from("disposable recovery passphrase".to_owned());
         let encrypted_identity = encrypt_identity(&recovery_plaintext, recovery_passphrase).unwrap();
+        validate_encrypted_identity(&encrypted_identity).unwrap();
         let restored = decrypt_identity(
             &encrypted_identity,
             SecretString::from("disposable recovery passphrase".to_owned()),
@@ -171,6 +181,15 @@ mod tests {
         .unwrap();
         validate_identity_recipient(&restored, &recipient).unwrap();
         assert_eq!(restored.to_public().to_string(), recipient.to_string());
+    }
+
+    #[test]
+    fn encrypted_identity_validation_rejects_malformed_and_wrong_recipient_format() {
+        assert!(validate_encrypted_identity(b"invalid").is_err());
+
+        let identity = age::x25519::Identity::generate();
+        let encrypted_secret = encrypt_secret(&identity.to_public(), b"not a recovery identity").unwrap();
+        assert!(validate_encrypted_identity(&encrypted_secret).is_err());
     }
 
     #[test]

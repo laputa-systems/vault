@@ -24,6 +24,9 @@ use crate::linux as storage;
 
 use std::fs::OpenOptions;
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("vault supports macOS and Linux");
+
 #[cfg(target_os = "macos")]
 use crate::macos as storage;
 
@@ -64,10 +67,8 @@ Examples:
 
 #[cfg(target_os = "macos")]
 const STORAGE_WARNING: &str = concat!(
-    "macOS storage: new secrets use an age store protected by Secure Enclave hardware (macOS 10.15+). ",
-    "Existing Keychain items remain in compatibility mode until replaced with 'vault set'. ",
-    "Their userPresence enforcement is unverified; an isolated file-Keychain item was readable without interaction. ",
-    "The recovery identity uses a separate passphrase. Device-owner authentication may use Touch ID or the Mac password.\n",
+    "macOS storage: secrets use an age store protected by Secure Enclave hardware (macOS 10.15+). ",
+    "Recovery uses a separate passphrase. Device-owner authentication may use Touch ID or the Mac password.\n",
 );
 
 #[cfg(target_os = "linux")]

@@ -13,13 +13,13 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 use std::ffi::{CString, OsString};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::{Zeroize, Zeroizing};
-use vault::keychain;
+use rustix::process::geteuid;
 
 const STORE_NAME: &str = "vault";
 const SECRETS_NAME: &str = "secrets";
@@ -61,6 +61,16 @@ struct Store {
 pub(crate) fn set_secret(
     name: &str,
     value: &[u8],
+    prompt: impl FnMut(RecoveryPrompt) -> Result<SecretString, String>,
+) -> Result<(), String> {
+    let data_home = data_home()?;
+    set_secret_at(&data_home, name, value, prompt)
+}
+
+fn set_secret_at(
+    data_home: &Path,
+    name: &str,
+    value: &[u8],
     mut prompt: impl FnMut(RecoveryPrompt) -> Result<SecretString, String>,
 ) -> Result<(), String> {
     validate_store_name(name)?;
@@ -70,24 +80,21 @@ pub(crate) fn set_secret(
             MAX_SECRET_BYTES / (1024 * 1024)
         ));
     }
-    let data_home = data_home()?;
-    let data = open_data_home(&data_home, true)?.expect("data home was created");
+    let data = open_data_home(data_home, true)?.expect("data home was created");
     let lock = open_lock_file(&data)?;
     flock(&lock, FlockOperation::LockExclusive)
         .map_err(|source| io_error("lock macOS store", source))?;
-    cleanup_staging_directories(&data)?;
 
     if let Some(store) = open_store(&data)? {
         let recipient = read_recipient(&store.root)?;
+        validate_recovery_identity(&store.root)?;
         read_secure_enclave_sidecar(&store.root)?;
-        cleanup_temporary_files(&store.secrets)?;
         let ciphertext = encrypt_secret(&recipient, value)
             .map_err(|_| format!("vault: {name}: encryption failed"))?;
         if ciphertext.len() > MAX_SECRET_CIPHERTEXT {
             return Err(format!("vault: {name}: encrypted secret exceeds the storage limit"));
         }
-        atomic_write(&store.secrets, &secret_filename(name)?, &ciphertext)?;
-        cleanup_compatibility_secret(name)
+        atomic_write(&store.secrets, &secret_filename(name)?, &ciphertext)
     } else {
         let passphrase = prompt(RecoveryPrompt::Create)?;
         if passphrase.expose_secret().is_empty() {
@@ -97,8 +104,7 @@ pub(crate) fn set_secret(
         if passphrase.expose_secret() != confirmation.expose_secret() {
             return Err("vault: recovery passphrases do not match".to_owned());
         }
-        initialize_store(&data, name, value, passphrase)?;
-        cleanup_compatibility_secret(name)
+        initialize_store(&data, name, value, passphrase)
     }
 }
 
@@ -115,31 +121,21 @@ pub(crate) fn get_secrets(names: &[&str]) -> Result<Vec<String>, String> {
         validate_name(name)?;
     }
     let data_home = data_home()?;
-    let Some(data) = open_data_home(&data_home, false)? else {
-        return compatibility_values(names);
-    };
-    let Some(store) = open_store(&data)? else {
-        return compatibility_values(names);
-    };
+    let data = open_data_home(&data_home, false)?
+        .ok_or_else(|| "vault: Secure Enclave store is not initialized".to_owned())?;
     let lock = open_lock_file(&data)?;
     flock(&lock, FlockOperation::LockShared)
         .map_err(|source| io_error("lock macOS store", source))?;
+    let store = open_store(&data)?
+        .ok_or_else(|| "vault: Secure Enclave store is not initialized".to_owned())?;
 
-    let encrypted_values = read_age_values(&store, names)?;
-    let mut values = Vec::with_capacity(names.len());
-    for (name, value) in names.iter().zip(encrypted_values) {
-        match value {
-            Some(value) => values.push(value),
-            None => values.push(Zeroizing::new(keychain::get_secret(name)?)),
-        }
-    }
-    Ok(release_values(values))
+    Ok(release_values(read_age_values(&store, names)?))
 }
 
 fn read_age_values(
     store: &Store,
     names: &[&str],
-) -> Result<Vec<Option<Zeroizing<String>>>, String> {
+) -> Result<Vec<Zeroizing<String>>, String> {
     let recipient = read_recipient(&store.root)?;
     let sidecar = read_secure_enclave_sidecar(&store.root)?;
     let wrapped_identity = unwrap_identity(
@@ -153,29 +149,14 @@ fn read_age_values(
 
     let mut values = Vec::with_capacity(names.len());
     for name in names {
-        let Ok(filename) = secret_filename(name) else {
-            values.push(None);
-            continue;
-        };
-        if !secret_exists(&store.secrets, &filename)? {
-            values.push(None);
-            continue;
-        }
+        let filename = secret_filename(name)?;
         let ciphertext = read_private_file(&store.secrets, &filename, MAX_SECRET_CIPHERTEXT)?;
         let value = decrypt_secret(&identity, &ciphertext).map_err(|error| {
             format!("vault: {name}: encrypted secret is damaged or cannot be decrypted: {error}")
         })?;
-        values.push(Some(value));
+        values.push(value);
     }
     Ok(values)
-}
-
-fn compatibility_values(names: &[&str]) -> Result<Vec<String>, String> {
-    let mut values = Vec::with_capacity(names.len());
-    for name in names {
-        values.push(Zeroizing::new(keychain::get_secret(name)?));
-    }
-    Ok(release_values(values))
 }
 
 fn release_values(values: Vec<Zeroizing<String>>) -> Vec<String> {
@@ -186,50 +167,34 @@ fn release_values(values: Vec<Zeroizing<String>>) -> Vec<String> {
 }
 
 pub(crate) fn delete_secret(name: &str) -> Result<(), String> {
-    validate_name(name)?;
+    validate_store_name(name)?;
     let data_home = data_home()?;
-    let mut removed_from_store = false;
-    if let Some(data) = open_data_home(&data_home, false)? {
-        let lock = open_lock_file(&data)?;
-        flock(&lock, FlockOperation::LockExclusive)
-            .map_err(|source| io_error("lock macOS store", source))?;
-        if let Some(store) = open_store(&data)?
-            && let Ok(filename) = secret_filename(name)
-        {
-            match unlinkat(&store.secrets, filename.as_str(), AtFlags::empty()) {
-                Ok(()) => {
-                    fsync(&store.secrets)
-                        .map_err(|source| io_error("sync secrets directory", source))?;
-                    removed_from_store = true;
-                }
-                Err(Errno::NOENT) => {}
-                Err(source) => return Err(io_error(&format!("remove secret {name}"), source)),
+    let data = open_data_home(&data_home, false)?
+        .ok_or_else(|| format!("vault: {name}: not found"))?;
+    let lock = open_lock_file(&data)?;
+    flock(&lock, FlockOperation::LockExclusive)
+        .map_err(|source| io_error("lock macOS store", source))?;
+    let store = open_store(&data)?.ok_or_else(|| format!("vault: {name}: not found"))?;
+    unlinkat(&store.secrets, secret_filename(name)?.as_str(), AtFlags::empty())
+        .map_err(|source| {
+            if source == Errno::NOENT {
+                format!("vault: {name}: not found")
+            } else {
+                io_error(&format!("remove secret {name}"), source)
             }
-        }
-    }
-    match keychain::delete_secret(name) {
-        Ok(()) => Ok(()),
-        Err(error) if removed_from_store && error.ends_with("not found") => Ok(()),
-        Err(error) if removed_from_store => {
-            Err(format!("{error}; the encrypted store item was already removed"))
-        }
-        Err(error) => Err(error),
-    }
+        })?;
+    fsync(&store.secrets).map_err(|source| io_error("sync secrets directory", source))
 }
 
 pub(crate) fn list_secrets() -> Result<Vec<String>, String> {
     let data_home = data_home()?;
     let Some(data) = open_data_home(&data_home, false)? else {
-        return keychain::list_secrets();
+        return Ok(Vec::new());
     };
     let Some(store) = open_store(&data)? else {
-        return keychain::list_secrets();
+        return Ok(Vec::new());
     };
-    let mut names = managed_names(&store.secrets, false)?;
-    names.extend(keychain::list_secrets()?);
-    names.sort_unstable();
-    names.dedup();
-    Ok(names)
+    managed_names(&store.secrets, false)
 }
 
 pub(crate) fn purge_secrets() -> Result<usize, String> {
@@ -251,13 +216,7 @@ pub(crate) fn purge_secrets() -> Result<usize, String> {
             fsync(&store.secrets).map_err(|source| io_error("sync secrets directory", source))?;
         }
     }
-    match keychain::purge_secrets() {
-        Ok(removed_from_keychain) => Ok(removed_from_store + removed_from_keychain),
-        Err(error) if removed_from_store > 0 => {
-            Err(format!("{error}; removed {removed_from_store} encrypted secret(s)"))
-        }
-        Err(error) => Err(error),
-    }
+    Ok(removed_from_store)
 }
 
 pub(crate) fn recover(
@@ -290,6 +249,7 @@ fn recover_at(
     let identity_bytes = Zeroizing::new(private_key.expose_secret().as_bytes().to_vec());
     let sidecar = wrap_identity(&identity_bytes, &identity_binding(&recipient))
         .map_err(format_secure_enclave_error)?;
+    validate_sidecar(&sidecar).map_err(format_secure_enclave_error)?;
     atomic_write(&store.root, SECURE_ENCLAVE_NAME, &sidecar)
 }
 
@@ -397,24 +357,89 @@ fn open_data_home(path: &Path, create: bool) -> Result<Option<File>, String> {
     if !path.is_absolute() {
         return Err("vault: application support directory must be absolute".to_owned());
     }
-    if create {
-        fs::create_dir_all(path).map_err(|source| io_error("create application support directory", source))?;
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => components.push(name),
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err("vault: application support path contains an unsafe component".to_owned());
+            }
+        }
     }
-    let dir = match openat(
-        CWD,
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => File::from(fd),
-        Err(Errno::NOENT) if !create => return Ok(None),
-        Err(source) => return Err(io_error("open application support directory", source)),
+    let Some((last, parents)) = components.split_last() else {
+        return Err("vault: application support directory cannot be the filesystem root".to_owned());
     };
-    let metadata = fstat(&dir).map_err(|source| io_error("inspect application support directory", source))?;
-    if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
-        return Err("vault: application support path is not a directory".to_owned());
+    let flags = OFlags::RDONLY
+        | OFlags::DIRECTORY
+        | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK
+        | OFlags::CLOEXEC;
+    let root = openat(CWD, "/", flags, Mode::empty())
+        .map_err(|source| io_error("open filesystem root", source))?;
+    let mut dir = File::from(root);
+    ensure_trusted_parent(&dir, "filesystem root")?;
+
+    for (index, component) in parents
+        .iter()
+        .copied()
+        .chain(std::iter::once(*last))
+        .enumerate()
+    {
+        let next = match openat(&dir, component, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) if create => {
+                match mkdirat(&dir, component, mode(0o755)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(source) => return Err(io_error("create application support directory", source)),
+                }
+                openat(&dir, component, flags, Mode::empty())
+                    .map_err(|source| io_error("open application support directory", source))?
+            }
+            Err(Errno::NOENT) => return Ok(None),
+            Err(source) => return Err(io_error("open application support directory", source)),
+        };
+        let next = File::from(next);
+        let metadata = fstat(&next)
+            .map_err(|source| io_error("inspect application support directory", source))?;
+        if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
+            return Err("vault: application support path is not a directory".to_owned());
+        }
+        if index + 1 == components.len() {
+            ensure_owned_data_home(&metadata)?;
+        } else {
+            ensure_trusted_directory(&metadata, "application support parent")?;
+        }
+        dir = next;
     }
     Ok(Some(dir))
+}
+
+fn ensure_trusted_parent(dir: &File, label: &str) -> Result<(), String> {
+    let metadata = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
+    ensure_trusted_directory(&metadata, label)
+}
+
+fn ensure_trusted_directory(metadata: &rustix::fs::Stat, label: &str) -> Result<(), String> {
+    let owner = geteuid().as_raw();
+    let mode = u32::from(metadata.st_mode & 0o7777);
+    if metadata.st_uid != 0 && metadata.st_uid != owner {
+        return Err(format!("vault: {label} has an unexpected owner"));
+    }
+    if mode & 0o022 != 0 && !(metadata.st_uid == 0 && mode & 0o1000 != 0) {
+        return Err(format!("vault: {label} is writable by other users"));
+    }
+    Ok(())
+}
+
+fn ensure_owned_data_home(metadata: &rustix::fs::Stat) -> Result<(), String> {
+    if metadata.st_uid != geteuid().as_raw() {
+        return Err("vault: application support directory is not owned by the current user".to_owned());
+    }
+    if u32::from(metadata.st_mode & 0o0022) != 0 {
+        return Err("vault: application support directory is writable by other users".to_owned());
+    }
+    Ok(())
 }
 
 fn open_lock_file(data: &File) -> Result<File, String> {
@@ -461,10 +486,17 @@ fn open_directory_at(parent: &File, name: &str, label: &str) -> Result<File, Str
     if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
         return Err(format!("vault: {label} is not a directory"));
     }
+    if metadata.st_uid != geteuid().as_raw() {
+        return Err(format!("vault: {label} is not owned by the current user"));
+    }
     Ok(dir)
 }
 
 fn set_directory_mode(dir: &File, expected: u32, label: &str) -> Result<(), String> {
+    let before = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
+    if !FileType::from_raw_mode(before.st_mode).is_dir() || before.st_uid != geteuid().as_raw() {
+        return Err(format!("vault: {label} is not an owned directory"));
+    }
     fchmod(dir, mode(expected)).map_err(|source| io_error(&format!("set permissions on {label}"), source))?;
     let metadata = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
     if u32::from(metadata.st_mode & 0o7777) != expected {
@@ -478,6 +510,9 @@ fn ensure_regular_file(file: &File, label: &str) -> Result<(), String> {
     if !FileType::from_raw_mode(metadata.st_mode).is_file() {
         return Err(format!("vault: {label} is not a regular file"));
     }
+    if metadata.st_uid != geteuid().as_raw() {
+        return Err(format!("vault: {label} is not owned by the current user"));
+    }
     if metadata.st_nlink != 1 {
         return Err(format!("vault: {label} has an unexpected hard link"));
     }
@@ -485,6 +520,7 @@ fn ensure_regular_file(file: &File, label: &str) -> Result<(), String> {
 }
 
 fn set_file_mode(file: &File, expected: u32, label: &str) -> Result<(), String> {
+    ensure_regular_file(file, label)?;
     fchmod(file, mode(expected)).map_err(|source| io_error(&format!("set permissions on {label}"), source))?;
     let metadata = fstat(file).map_err(|source| io_error(&format!("inspect {label}"), source))?;
     if u32::from(metadata.st_mode & 0o7777) != expected {
@@ -504,6 +540,12 @@ fn read_secure_enclave_sidecar(root: &File) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("vault: cannot read Secure Enclave identity: {error}"))?;
     validate_sidecar(&sidecar).map_err(format_secure_enclave_error)?;
     Ok(sidecar)
+}
+
+fn validate_recovery_identity(root: &File) -> Result<(), String> {
+    let encrypted = read_private_file(root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT)
+        .map_err(|error| format!("vault: cannot read recovery identity: {error}"))?;
+    crate::store::validate_encrypted_identity(&encrypted)
 }
 
 fn read_private_file(dir: &File, name: &str, max_size: usize) -> Result<Vec<u8>, String> {
@@ -619,24 +661,6 @@ fn format_secure_enclave_error(error: SecureEnclaveError) -> String {
     format!("vault: {error}")
 }
 
-fn secret_exists(dir: &File, name: &str) -> Result<bool, String> {
-    match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => Ok(true),
-        Err(Errno::NOENT) => Ok(false),
-        Err(source) => Err(io_error(&format!("inspect {name}"), source)),
-    }
-}
-
-fn cleanup_compatibility_secret(name: &str) -> Result<(), String> {
-    match keychain::delete_secret(name) {
-        Ok(()) => Ok(()),
-        Err(error) if error.ends_with("not found") => Ok(()),
-        Err(error) => Err(format!(
-            "vault: encrypted secret was stored, but Keychain cleanup failed: {error}"
-        )),
-    }
-}
-
 fn create_staging_directory(data: &File) -> Result<(String, File), String> {
     for _ in 0..32 {
         let name = next_temp_name(INIT_PREFIX);
@@ -657,19 +681,6 @@ fn create_staging_directory(data: &File) -> Result<(String, File), String> {
         }
     }
     Err("vault: could not allocate an initialization directory".to_owned())
-}
-
-fn cleanup_staging_directories(data: &File) -> Result<(), String> {
-    for entry in directory_names(data)? {
-        if !entry.to_bytes().starts_with(INIT_PREFIX.as_bytes()) {
-            continue;
-        }
-        let Ok(name) = entry.to_str() else {
-            continue;
-        };
-        remove_staging_directory(data, name)?;
-    }
-    Ok(())
 }
 
 fn remove_staging_directory(data: &File, name: &str) -> Result<(), String> {
@@ -708,21 +719,6 @@ fn remove_directory_entries(dir: &File, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cleanup_temporary_files(secrets: &File) -> Result<(), String> {
-    for name in directory_names(secrets)? {
-        if name.to_bytes().starts_with(TEMP_PREFIX.as_bytes()) {
-            let stat = statat(secrets, &name, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(|source| io_error("inspect abandoned temporary file", source))?;
-            if FileType::from_raw_mode(stat.st_mode).is_dir() {
-                return Err("vault: unexpected directory in secrets store".to_owned());
-            }
-            unlinkat(secrets, &name, AtFlags::empty())
-                .map_err(|source| io_error("remove abandoned temporary file", source))?;
-        }
-    }
-    Ok(())
-}
-
 fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), String> {
     validate_filename(destination)?;
     match statat(dir, destination, AtFlags::SYMLINK_NOFOLLOW) {
@@ -731,6 +727,9 @@ fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), St
         }
         Ok(stat) if stat.st_nlink != 1 => {
             return Err(format!("vault: {destination} has an unexpected hard link"));
+        }
+        Ok(stat) if stat.st_uid != geteuid().as_raw() => {
+            return Err(format!("vault: {destination} is not owned by the current user"));
         }
         Ok(_) | Err(Errno::NOENT) => {}
         Err(source) => return Err(io_error(&format!("inspect {destination}"), source)),
@@ -847,10 +846,11 @@ fn io_error(operation: &str, source: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_NAME_BYTES, SECURE_ENCLAVE_NAME, STORE_NAME, data_home_from, decode_secret_filename,
-        initialize_store, open_data_home, open_store, read_age_values, recover_at,
-        secret_filename, validate_store_name,
-        PRIVATE_DIRECTORY_MODE,
+        MAX_NAME_BYTES, SECURE_ENCLAVE_NAME, STORE_NAME, cleanup_failure,
+        create_staging_directory, data_home_from, decode_secret_filename, initialize_store,
+        open_data_home, open_store, read_age_values, recover_at,
+        secret_filename, set_secret_at, validate_store_name,
+        PRIVATE_DIRECTORY_MODE, validate_recovery_identity,
     };
     use age::secrecy::SecretString;
     use std::ffi::OsString;
@@ -922,6 +922,34 @@ mod tests {
     }
 
     #[test]
+    fn failed_initialization_cleanup_preserves_unrelated_prefixed_directories() {
+        let test_dir = TestDir::new();
+        let data = open_data_home(test_dir.path(), false).unwrap().unwrap();
+        let unrelated = test_dir.path().join(".vault-init-unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join("sentinel"), b"preserve").unwrap();
+        let (stage_name, stage) = create_staging_directory(&data).unwrap();
+        drop(stage);
+
+        assert_eq!(cleanup_failure(&data, &stage_name, "failed operation".to_owned()), "failed operation");
+        assert_eq!(fs::read(unrelated.join("sentinel")).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn application_support_rejects_symlink_components_and_writable_directories() {
+        let test_dir = TestDir::new();
+        let target = test_dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
+        let link = test_dir.path().join("linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_data_home(&link, false).is_err());
+
+        fs::set_permissions(test_dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(open_data_home(test_dir.path(), false).is_err());
+    }
+
+    #[test]
     #[ignore = "requires Secure Enclave hardware and interactive device-owner authentication"]
     fn secure_enclave_store_roundtrips_age_secret_from_private_files() {
         let test_dir = TestDir::new();
@@ -950,10 +978,40 @@ mod tests {
         let data = open_data_home(test_dir.path(), false).unwrap().unwrap();
         let store = open_store(&data).unwrap().unwrap();
         let values = read_age_values(&store, &["DUMMY"]).unwrap();
-        assert_eq!(
-            values[0].as_deref().map(String::as_str),
-            Some("disposable file-backed Secure Enclave value")
-        );
+        assert_eq!(values[0].as_str(), "disposable file-backed Secure Enclave value");
+    }
+
+    #[test]
+    fn recovery_identity_must_exist_and_have_a_valid_age_header() {
+        let test_dir = TestDir::new();
+        let data = open_data_home(test_dir.path(), false).unwrap().unwrap();
+        assert!(validate_recovery_identity(&data).is_err());
+
+        fs::write(test_dir.path().join("identity.age"), b"invalid").unwrap();
+        assert!(validate_recovery_identity(&data).is_err());
+    }
+
+    #[test]
+    fn set_refuses_to_write_when_recovery_identity_is_missing_or_malformed() {
+        for recovery_identity in [None, Some(&b"invalid"[..])] {
+            let test_dir = TestDir::new();
+            let store = test_dir.path().join(STORE_NAME);
+            let secrets = store.join("secrets");
+            fs::create_dir(&store).unwrap();
+            fs::create_dir(&secrets).unwrap();
+            let recipient = age::x25519::Identity::generate().to_public();
+            fs::write(store.join("recipient"), format!("{recipient}\n")).unwrap();
+            if let Some(identity) = recovery_identity {
+                fs::write(store.join("identity.age"), identity).unwrap();
+            }
+
+            let error = set_secret_at(test_dir.path(), "NEW", b"value", |_| {
+                panic!("an existing store never prompts to replace its recovery identity")
+            })
+            .unwrap_err();
+            assert!(error.contains("recovery identity") || error.contains("encrypted identity is malformed"));
+            assert!(!secrets.join(secret_filename("NEW").unwrap()).exists());
+        }
     }
 
 }
