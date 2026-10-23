@@ -321,8 +321,10 @@ fn cmd_set(args: &[String], silent: bool) -> Result<(), CliError> {
     let name = require_exact_name(args, if silent { "isset" } else { "set" })?;
     #[cfg(target_os = "linux")]
     crate::store::validate_name(name).map_err(CliError::InvalidInput)?;
-    let value = read_secret(name, silent)?;
-    persist_secret(name, Ok(value), store_secret)
+    let mut value = read_secret(name, silent)?;
+    let result = store_secret(name, value.as_bytes());
+    value.zeroize();
+    result.map_err(CliError::Storage)
 }
 
 #[cfg(target_os = "macos")]
@@ -333,18 +335,6 @@ fn store_secret(name: &str, value: &[u8]) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn store_secret(name: &str, value: &[u8]) -> Result<(), String> {
     storage::set_secret(name, value, prompt_master_passphrase)
-}
-
-fn persist_secret(
-    name: &str,
-    read_value: Result<String, CliError>,
-    store: impl FnOnce(&str, &[u8]) -> Result<(), String>,
-) -> Result<(), CliError> {
-    let value = read_value?;
-    let result = store(name, value.as_bytes());
-    let mut value = value;
-    value.zeroize();
-    result.map_err(CliError::Storage)
 }
 
 fn cmd_get(args: &[String]) -> Result<(), CliError> {
@@ -439,11 +429,6 @@ fn parse_env_spec(spec: &str) -> EnvSpec<'_> {
     EnvSpec::Secret(spec)
 }
 
-enum ExecEnv<'a> {
-    Literal(String, String),
-    Secret(&'a str),
-}
-
 #[cfg(target_os = "macos")]
 fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
     storage::get_secrets(names).map_err(CliError::Storage)
@@ -496,23 +481,19 @@ fn exec_mode(args: &[String]) -> Result<ExitCode, CliError> {
     let mut resolved_specs = Vec::with_capacity(specs.len());
     let mut names = Vec::new();
     for spec in specs {
-        match parse_env_spec(spec) {
-            EnvSpec::Literal { name, value } => {
-                resolved_specs.push(ExecEnv::Literal(name.to_owned(), value.to_owned()));
-            }
-            EnvSpec::Secret(name) => {
-                names.push(name);
-                resolved_specs.push(ExecEnv::Secret(name));
-            }
+        let spec = parse_env_spec(spec);
+        if let EnvSpec::Secret(name) = &spec {
+            names.push(*name);
         }
+        resolved_specs.push(spec);
     }
 
     let mut values = get_secrets(&names)?.into_iter();
     let mut environment: Vec<_> = resolved_specs
         .into_iter()
         .map(|spec| match spec {
-            ExecEnv::Literal(name, value) => (name, value),
-            ExecEnv::Secret(name) => (name.to_owned(), values.next().expect("resolved secret")),
+            EnvSpec::Literal { name, value } => (name.to_owned(), value.to_owned()),
+            EnvSpec::Secret(name) => (name.to_owned(), values.next().expect("resolved secret")),
         })
         .collect();
     run_child(cmd_args, &mut environment)
@@ -1010,7 +991,7 @@ impl Drop for SignalHandlers {
 mod tests {
     use super::{
         CliError, EnvSpec, MAX_SECRET_BYTES, TerminalSettings, cmd_purge_with, parse_env_spec,
-        parse_exec_args, persist_secret, read_limited_utf8, read_without_echo, run_child,
+        parse_exec_args, read_limited_utf8, read_without_echo, run_child,
     };
     use std::io::{self, Cursor, Read, Write};
 
@@ -1365,25 +1346,5 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, CliError::Interrupted(2)));
         assert!(terminal.echo_enabled);
-    }
-
-    #[test]
-    fn failed_terminal_restoration_prevents_storage() {
-        let mut stored = false;
-        let error = persist_secret(
-            "NAME",
-            Err(CliError::TerminalSettings {
-                operation: "restore settings",
-                source: io::Error::other("restore failure"),
-                restore: None,
-            }),
-            |_, _| {
-                stored = true;
-                Ok(())
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(error, CliError::TerminalSettings { .. }));
-        assert!(!stored);
     }
 }

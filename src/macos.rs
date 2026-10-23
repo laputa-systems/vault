@@ -260,19 +260,30 @@ fn initialize_store(
     passphrase: SecretString,
 ) -> Result<(), String> {
     let (stage_name, stage) = create_staging_directory(data)?;
-    let result = populate_staging_directory(&stage, &[(name.to_owned(), Zeroizing::new(
-        String::from_utf8(value.to_vec()).map_err(|error| {
-            let mut bytes = error.into_bytes();
-            bytes.zeroize();
-            "vault: secret is not valid UTF-8".to_owned()
-        })?,
-    ))], passphrase);
-    publish_staging_directory(data, &stage_name, stage, result)
+    let value = std::str::from_utf8(value)
+        .map_err(|_| "vault: secret is not valid UTF-8".to_owned())?;
+    let result = populate_staging_directory(&stage, name, value, passphrase);
+    if let Err(primary) = result {
+        drop(stage);
+        return Err(cleanup_failure(data, &stage_name, primary));
+    }
+    if let Err(source) = renameat_with(data, &stage_name, data, STORE_NAME, RenameFlags::NOREPLACE) {
+        drop(stage);
+        return Err(cleanup_failure(
+            data,
+            &stage_name,
+            io_error("publish initialized macOS store", source),
+        ));
+    }
+    fsync(data).map_err(|source| io_error("sync application support directory", source))?;
+    drop(stage);
+    Ok(())
 }
 
 fn populate_staging_directory(
     stage: &File,
-    source: &[(String, Zeroizing<String>)],
+    name: &str,
+    value: &str,
     passphrase: SecretString,
 ) -> Result<(), String> {
     let identity = age::x25519::Identity::generate();
@@ -294,41 +305,16 @@ fn populate_staging_directory(
         .map_err(|source| io_error("create secrets directory", source))?;
     let secrets = open_directory_at(stage, SECRETS_NAME, "secrets directory")?;
     set_directory_mode(&secrets, PRIVATE_DIRECTORY_MODE, "secrets directory")?;
-    for (name, value) in source {
-        let ciphertext = encrypt_secret(&recipient, value.as_bytes())
-            .map_err(|_| format!("vault: {name}: encryption failed"))?;
-        let verified = decrypt_secret(&identity, &ciphertext)
-            .map_err(|error| format!("vault: {name}: encrypted-store verification failed: {error}"))?;
-        if verified.as_str() != value.as_str() {
-            return Err(format!("vault: encrypted-store verification failed for {name}"));
-        }
-        atomic_write(&secrets, &secret_filename(name)?, &ciphertext)?;
+    let ciphertext = encrypt_secret(&recipient, value.as_bytes())
+        .map_err(|_| format!("vault: {name}: encryption failed"))?;
+    let verified = decrypt_secret(&identity, &ciphertext)
+        .map_err(|error| format!("vault: {name}: encrypted-store verification failed: {error}"))?;
+    if verified.as_str() != value {
+        return Err(format!("vault: encrypted-store verification failed for {name}"));
     }
+    atomic_write(&secrets, &secret_filename(name)?, &ciphertext)?;
     fsync(&secrets).map_err(|source| io_error("sync secrets directory", source))?;
     fsync(stage).map_err(|source| io_error("sync initialized store", source))
-}
-
-fn publish_staging_directory(
-    data: &File,
-    stage_name: &str,
-    stage: File,
-    result: Result<(), String>,
-) -> Result<(), String> {
-    if let Err(primary) = result {
-        drop(stage);
-        return Err(cleanup_failure(data, stage_name, primary));
-    }
-    if let Err(source) = renameat_with(data, stage_name, data, STORE_NAME, RenameFlags::NOREPLACE) {
-        drop(stage);
-        return Err(cleanup_failure(
-            data,
-            stage_name,
-            io_error("publish initialized macOS store", source),
-        ));
-    }
-    fsync(data).map_err(|source| io_error("sync application support directory", source))?;
-    drop(stage);
-    Ok(())
 }
 
 fn data_home() -> Result<PathBuf, String> {
