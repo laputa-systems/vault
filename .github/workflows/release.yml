@@ -33,6 +33,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install musl linker
         if: matrix.target == 'x86_64-unknown-linux-musl'
