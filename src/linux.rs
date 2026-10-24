@@ -1112,15 +1112,11 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let path = std::env::current_dir()
-                .unwrap()
-                .join(".work/tmp")
-                .join(format!(
-                    "vault-test-{}-{}",
-                    std::process::id(),
-                    NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-                ));
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "vault-test-{}-{}",
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::create_dir(&path).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
             Self(path)
