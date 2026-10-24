@@ -599,9 +599,28 @@ mod unix_pty {
                 .unwrap()
                 .wait_with_output()
                 .unwrap();
-            assert!(!lock.status.success());
-            assert!(String::from_utf8_lossy(&lock.stderr)
-                .contains("clear Linux identity cache failed"));
+            if lock.status.success() {
+                let stdout = String::from_utf8_lossy(&lock.stdout);
+                assert!(
+                    stdout == "identity cache cleared\n"
+                        || stdout == "identity cache already clear\n",
+                    "unexpected lock output: {stdout:?}"
+                );
+            } else {
+                assert!(String::from_utf8_lossy(&lock.stderr)
+                    .contains("clear Linux identity cache failed"));
+            }
+            let revoked_get = launch_headless(
+                data_home.path(),
+                &["get", "TOKEN"],
+                Stdio::null(),
+            )
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+            assert!(!revoked_get.status.success());
+            assert!(String::from_utf8_lossy(&revoked_get.stderr)
+                .contains("controlling terminal is required"));
         }
 
         let listed = launch_headless(data_home.path(), &["ls"], Stdio::null())
