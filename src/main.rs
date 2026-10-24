@@ -627,13 +627,6 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
         operation: "open controlling terminal for passphrase prompt",
         source,
     })?;
-    output
-        .write_all(prompt.as_bytes())
-        .and_then(|()| output.flush())
-        .map_err(|source| CliError::Io {
-            operation: "write passphrase prompt",
-            source,
-        })?;
 
     let terminal_fd = tty.try_clone().map_err(|source| CliError::Io {
         operation: "open controlling terminal for terminal settings",
@@ -641,6 +634,37 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
     })?;
     let mut signals = SignalHandlers::install()?;
     let mut terminal = TerminalFd { fd: &terminal_fd };
+    {
+        let mut prompt_session = TerminalSession::enter(&mut terminal)?;
+        let prompt_result = output
+            .write_all(prompt.as_bytes())
+            .and_then(|()| output.flush());
+        if let Err(source) = prompt_result {
+            if let Err(restore) = prompt_session.restore() {
+                let _ = signals.restore();
+                return Err(CliError::TerminalReadAndPromptOutput {
+                    read: Box::new(CliError::TerminalSettings {
+                        operation: "restore settings",
+                        source: restore,
+                        restore: None,
+                    }),
+                    output: source,
+                });
+            }
+            let _ = signals.restore();
+            return Err(CliError::Io {
+                operation: "write passphrase prompt",
+                source,
+            });
+        }
+        prompt_session
+            .restore()
+            .map_err(|source| CliError::TerminalSettings {
+                operation: "restore settings",
+                source,
+                restore: None,
+            })?;
+    }
     let read_result = read_without_echo(
         &mut tty,
         &mut output,

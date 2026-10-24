@@ -366,10 +366,7 @@ fn validate_path_parent(dir: &File) -> Result<(), String> {
         return Err("vault: XDG data path parent has an unexpected owner".to_owned());
     }
     if metadata.st_mode & 0o022 != 0
-        && !(metadata.st_uid == 0
-            && metadata.st_mode & 0o1000 != 0
-            && metadata.st_mode & 0o002 != 0
-            && metadata.st_mode & 0o020 == 0)
+        && !(metadata.st_uid == 0 && metadata.st_mode & 0o1000 != 0)
     {
         return Err("vault: XDG data path parent is writable by another user".to_owned());
     }
