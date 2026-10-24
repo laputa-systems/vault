@@ -214,6 +214,7 @@ mod unix_pty {
                 .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
             output.extend_from_slice(&chunk);
         }
+        wait_for_hidden_echo(master)?;
         master.write_all(response.as_bytes())?;
         master.write_all(b"\n")
     }

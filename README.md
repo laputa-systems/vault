@@ -6,7 +6,8 @@
 
 Download the `vault-<version>-<target>` executable for your platform from
 [GitHub Releases](https://github.com/laputa-systems/vault/releases) and put it
-on your `PATH`.
+on your `PATH`. Linux binaries are statically linked (musl) with no runtime
+dependencies.
 
 ## Store and retrieve secrets
 

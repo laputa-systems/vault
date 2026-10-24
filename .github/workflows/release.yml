@@ -14,12 +14,13 @@ jobs:
         include:
           - runner: macos-latest
             target: aarch64-apple-darwin
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            docker_platform: ''
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            docker_platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            docker_platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     defaults:
@@ -29,28 +30,53 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install musl linker
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools mold
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: matrix.docker_platform != ''
+
+      - name: Build Linux release image
+        if: matrix.docker_platform != ''
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.docker_platform }}
+          load: true
+          tags: vault-builder:${{ matrix.target }}
+          cache-from: type=gha,scope=vault-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=vault-${{ matrix.target }}
 
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: matrix.docker_platform == ''
 
       - name: Run tests
+        if: matrix.docker_platform == ''
         run: cargo test
 
       - name: Build release
+        if: matrix.docker_platform == ''
         run: make dist TARGET=${{ matrix.target }}
 
-      - name: Run musl binary
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: target/${{ matrix.target }}/dist/vault --help
+      - name: Build and verify Linux release
+        if: matrix.docker_platform != ''
+        run: |
+          docker run --rm --init \
+            --platform "${{ matrix.docker_platform }}" \
+            -e CI \
+            -v "$GITHUB_WORKSPACE:/vault" \
+            -w /vault \
+            vault-builder:${{ matrix.target }} \
+            sh -ec '
+              cargo test
+              make dist TARGET=${{ matrix.target }}
+              make verify-dist TARGET=${{ matrix.target }}
+              target/${{ matrix.target }}/dist/vault --help
+            '
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -70,7 +96,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           V="${VERSION#release/}"
-          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl; do
+          for target in aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             mv "vault-${target}/vault" "vault-${V}-${target}"
           done
 

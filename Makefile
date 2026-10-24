@@ -22,4 +22,16 @@ dist:
 	  -Z build-std-features= \
 	  --target $(TARGET)
 
-.PHONY: lint install dist
+verify-dist:
+	@test -f "target/$(TARGET)/dist/$(NAME)"
+	@if echo "$(TARGET)" | grep -q -- '-linux-musl$$'; then \
+		command -v readelf >/dev/null || { echo 'readelf is required for dist verification' >&2; exit 1; }; \
+		file "target/$(TARGET)/dist/$(NAME)" | grep -Eq 'static-pie linked|statically linked' || { echo 'dist binary is not statically linked' >&2; exit 1; }; \
+		file "target/$(TARGET)/dist/$(NAME)" | grep -q 'stripped' || { echo 'dist binary is not stripped' >&2; exit 1; }; \
+		! readelf -l "target/$(TARGET)/dist/$(NAME)" | grep -q INTERP || { echo 'dist binary has a dynamic ELF interpreter' >&2; exit 1; }; \
+		! readelf -d "target/$(TARGET)/dist/$(NAME)" | grep -q NEEDED || { echo 'dist binary has dynamic dependencies' >&2; exit 1; }; \
+	else \
+		echo "Skipping ELF checks for $(TARGET)"; \
+	fi
+
+.PHONY: lint install dist verify-dist
