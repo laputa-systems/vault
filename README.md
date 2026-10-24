@@ -38,7 +38,7 @@ environment and standard streams, and vault returns the child's exit status.
 
 ## macOS storage and recovery
 
-New secrets use age encryption with an X25519 identity wrapped by a Secure
+Secrets use age encryption with an X25519 identity wrapped by a Secure
 Enclave P-256 key. Secure Enclave operations require macOS 10.15 or later and
 supported Secure Enclave hardware. Device-owner authentication may use Touch ID
 or the Mac login password.
