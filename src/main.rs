@@ -47,7 +47,7 @@ Usage:
 const PLATFORM_USAGE: &str = "  vault lock                    Remove this store's cached identity\n";
 
 #[cfg(target_os = "macos")]
-const PLATFORM_USAGE: &str = "  vault recover                 Rewrap the age identity with a new Secure Enclave key\n";
+const PLATFORM_USAGE: &str = "  vault lock                    Remove this store's cached identity\n  vault recover                 Rewrap the age identity with a new Secure Enclave key\n";
 
 const USAGE_FOOTER: &str = "\
 \n\
@@ -251,7 +251,7 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
             cmd_purge(&args[1..])?;
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         "lock" => {
             cmd_lock(&args[1..])?;
             Ok(ExitCode::SUCCESS)
@@ -259,6 +259,11 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
         #[cfg(target_os = "macos")]
         "recover" => {
             cmd_recover(&args[1..])?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(target_os = "macos")]
+        storage::CACHE_DAEMON_ARG => {
+            cmd_cache_daemon(&args[1..])?;
             Ok(ExitCode::SUCCESS)
         }
         "-h" | "--help" | "help" => {
@@ -348,7 +353,7 @@ fn cmd_get(args: &[String]) -> Result<(), CliError> {
 
 #[cfg(target_os = "macos")]
 fn get_secret(name: &str) -> Result<String, CliError> {
-    storage::get_secret(name).map_err(CliError::Storage)
+    storage::get_secret(name, report_identity_cache_warning).map_err(CliError::Storage)
 }
 
 #[cfg(target_os = "linux")]
@@ -375,12 +380,12 @@ fn cmd_purge(args: &[String]) -> Result<(), CliError> {
     cmd_purge_with(args, storage::purge_secrets)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cmd_lock(args: &[String]) -> Result<(), CliError> {
     require_no_args(args, "lock")?;
     match storage::clear_identity_cache().map_err(CliError::Storage)? {
-        linux::CacheClearResult::Cleared => write_stdout(b"identity cache cleared\n"),
-        linux::CacheClearResult::AlreadyClear => write_stdout(b"identity cache already clear\n"),
+        storage::CacheClearResult::Cleared => write_stdout(b"identity cache cleared\n"),
+        storage::CacheClearResult::AlreadyClear => write_stdout(b"identity cache already clear\n"),
     }
 }
 
@@ -431,7 +436,7 @@ fn parse_env_spec(spec: &str) -> EnvSpec<'_> {
 
 #[cfg(target_os = "macos")]
 fn get_secrets(names: &[&str]) -> Result<Vec<String>, CliError> {
-    storage::get_secrets(names).map_err(CliError::Storage)
+    storage::get_secrets(names, report_identity_cache_warning).map_err(CliError::Storage)
 }
 
 #[cfg(target_os = "linux")]
@@ -451,6 +456,19 @@ fn prompt_master_passphrase(prompt: linux::PassphrasePrompt) -> Result<SecretStr
 #[cfg(target_os = "macos")]
 fn prompt_recovery_passphrase(prompt: macos::RecoveryPrompt) -> Result<SecretString, String> {
     read_passphrase(prompt.prompt(), "recovery").map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn cmd_cache_daemon(args: &[String]) -> Result<(), CliError> {
+    require_no_args(args, storage::CACHE_DAEMON_ARG)?;
+    storage::run_cache_daemon().map_err(CliError::Storage)
+}
+
+#[cfg(target_os = "macos")]
+fn report_identity_cache_warning(message: &str) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    writeln!(stderr, "vault: {message}")?;
+    stderr.flush()
 }
 
 #[cfg(target_os = "linux")]

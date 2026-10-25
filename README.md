@@ -52,6 +52,11 @@ Enclave identity file cannot be used on another Mac by itself. Run
 Vault no longer reads or writes Keychain items; macOS secrets are available only
 from the age store.
 
+The first read asks for device-owner authentication. After unlocking, vault
+caches the decrypted identity in a per-store background daemon. The cache
+expires after 15 minutes of inactivity. `vault lock` clears this store's cached
+identity.
+
 ## Linux storage and recovery
 
 Linux encrypts secrets with age and protects the identity with a master
@@ -70,10 +75,12 @@ revoke an identity already in the cache.
 
 Secret values are limited to 16 MiB. Secret names and public recipient metadata
 are visible. On macOS, another same-user process can copy the opaque sidecar and
-request its own device-owner authentication. On Linux, the user-session
+request its own device-owner authentication. Within 15 minutes of a read, it
+can also read the cached identity from the daemon without authenticating.
+On Linux, the user-session
 keyring is shared across independent sessions for the same UID. A process with
 access can read and retain the complete decrypted identity beyond its
-15-minute keyring timeout. `vault lock` removes the store's keyring link but
+15-minute keyring timeout. `vault lock` removes the store's cached identity but
 cannot erase copies already made or guarantee physical erasure. A same-user
 process with write access to the Linux store can replace its public recipient
 and redirect later passphrase-free writes. Removing a secret does not securely

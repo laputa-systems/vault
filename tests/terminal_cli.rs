@@ -5,6 +5,7 @@ mod unix_pty {
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::fd::FromRawFd;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::os::unix::process::CommandExt;

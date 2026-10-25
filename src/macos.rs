@@ -15,11 +15,20 @@ use rustix::io::Errno;
 use std::ffi::{CString, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 use rustix::process::geteuid;
+
+unsafe extern "C" {
+    fn setsid() -> i32;
+}
 
 const STORE_NAME: &str = "vault";
 const SECRETS_NAME: &str = "secrets";
@@ -35,12 +44,29 @@ const MAX_NAME_BYTES: usize = 125;
 const MAX_SECURE_ENCLAVE_SIDECAR: usize = 1 << 20;
 const IDENTITY_BINDING_PREFIX: &[u8] = b"dev.joshuarli.vault\0age-x25519\0";
 
+pub(crate) const CACHE_DAEMON_ARG: &str = "__cache-daemon";
+const CACHE_SOCKET_NAME: &str = "cache.sock";
+const IDENTITY_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const CACHE_LINE_MAX: usize = 2048;
+const CACHE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const CACHE_START_RETRIES: u32 = 50;
+const CACHE_START_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+const CACHE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_SOCKET_PATH: usize = 103;
+const DAEMON_SEED_MAX: u64 = 2049;
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum RecoveryPrompt {
     Create,
     Confirm,
     Unlock,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CacheClearResult {
+    Cleared,
+    AlreadyClear,
 }
 
 impl RecoveryPrompt {
@@ -108,12 +134,18 @@ fn set_secret_at(
     }
 }
 
-pub(crate) fn get_secret(name: &str) -> Result<String, String> {
-    let mut values = get_secrets(&[name])?;
+pub(crate) fn get_secret(
+    name: &str,
+    cache_warning: impl FnMut(&str) -> std::io::Result<()>,
+) -> Result<String, String> {
+    let mut values = get_secrets(&[name], cache_warning)?;
     Ok(values.remove(0))
 }
 
-pub(crate) fn get_secrets(names: &[&str]) -> Result<Vec<String>, String> {
+pub(crate) fn get_secrets(
+    names: &[&str],
+    mut cache_warning: impl FnMut(&str) -> std::io::Result<()>,
+) -> Result<Vec<String>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
@@ -128,23 +160,36 @@ pub(crate) fn get_secrets(names: &[&str]) -> Result<Vec<String>, String> {
         .map_err(|source| io_error("lock macOS store", source))?;
     let store = open_store(&data)?
         .ok_or_else(|| "vault: Secure Enclave store is not initialized".to_owned())?;
+    let socket = cache_socket_path(&data_home);
 
-    Ok(release_values(read_age_values(&store, names)?))
+    Ok(release_values(read_age_values(&store, names, socket.as_deref(), &mut cache_warning)?))
 }
 
 fn read_age_values(
     store: &Store,
     names: &[&str],
+    socket: Option<&Path>,
+    cache_warning: &mut impl FnMut(&str) -> std::io::Result<()>,
 ) -> Result<Vec<Zeroizing<String>>, String> {
     let recipient = read_recipient(&store.root)?;
     let sidecar = read_secure_enclave_sidecar(&store.root)?;
-    let wrapped_identity = unwrap_identity(
-        &sidecar,
-        &identity_binding(&recipient),
-        Interaction::MayPrompt,
-    )
-    .map_err(format_secure_enclave_error)?;
-    let identity = identity_from_bytes(wrapped_identity)?;
+    let identity = match try_cached_identity(socket, &recipient, cache_warning) {
+        Some(identity) => identity,
+        None => {
+            let wrapped_identity = unwrap_identity(
+                &sidecar,
+                &identity_binding(&recipient),
+                Interaction::MayPrompt,
+            )
+            .map_err(format_secure_enclave_error)?;
+            let identity = identity_from_bytes(wrapped_identity)?;
+            validate_identity_recipient(&identity, &recipient)?;
+            if let Some(socket) = socket {
+                cache_unlocked_identity(socket, &recipient, &identity, cache_warning);
+            }
+            identity
+        }
+    };
     validate_identity_recipient(&identity, &recipient)?;
 
     let mut values = Vec::with_capacity(names.len());
@@ -251,6 +296,475 @@ fn recover_at(
         .map_err(format_secure_enclave_error)?;
     validate_sidecar(&sidecar).map_err(format_secure_enclave_error)?;
     atomic_write(&store.root, SECURE_ENCLAVE_NAME, &sidecar)
+}
+
+pub(crate) fn clear_identity_cache() -> Result<CacheClearResult, String> {
+    let data_home = data_home()?;
+    let Some(socket) = cache_socket_path(&data_home) else {
+        return Ok(CacheClearResult::AlreadyClear);
+    };
+    clear_identity_cache_at(&socket)
+}
+
+fn clear_identity_cache_at(socket: &Path) -> Result<CacheClearResult, String> {
+    let Some(mut stream) = connect_cache(socket)? else {
+        return Ok(CacheClearResult::AlreadyClear);
+    };
+    set_cache_timeouts(&stream)?;
+    stream
+        .write_all(b"lock\n")
+        .map_err(|source| io_error("write identity cache request", source))?;
+    let reply = read_cache_line(&mut stream)?;
+    if reply.as_slice() == b"ok" {
+        Ok(CacheClearResult::Cleared)
+    } else {
+        Err("vault: identity cache returned an invalid reply".to_owned())
+    }
+}
+
+pub(crate) fn run_cache_daemon() -> Result<(), String> {
+    let data_home = data_home()?;
+    let Some(socket) = cache_socket_path(&data_home) else {
+        return Err("vault: identity cache path exceeds the maximum socket path length".to_owned());
+    };
+    let (recipient_text, identity_text) = read_daemon_seed()?;
+    let recipient = parse_recipient(recipient_text.as_bytes())?;
+    let identity = parse_cached_identity(identity_text.as_str(), &recipient)?;
+    serve_cache(&socket, recipient.to_string(), identity, IDENTITY_CACHE_TTL)
+}
+
+fn cache_socket_path(data_home: &Path) -> Option<PathBuf> {
+    let socket = data_home.join(STORE_NAME).join(CACHE_SOCKET_NAME);
+    if socket.as_os_str().len() > MAX_SOCKET_PATH {
+        return None;
+    }
+    Some(socket)
+}
+
+fn try_cached_identity(
+    socket: Option<&Path>,
+    recipient: &age::x25519::Recipient,
+    cache_warning: &mut impl FnMut(&str) -> std::io::Result<()>,
+) -> Option<age::x25519::Identity> {
+    let socket = socket?;
+    match fetch_cached_identity(socket, recipient) {
+        Ok(identity) => identity,
+        Err(error) => {
+            report_cache_warning(cache_warning, error);
+            None
+        }
+    }
+}
+
+fn cache_unlocked_identity(
+    socket: &Path,
+    recipient: &age::x25519::Recipient,
+    identity: &age::x25519::Identity,
+    cache_warning: &mut impl FnMut(&str) -> std::io::Result<()>,
+) {
+    if let Err(error) = store_cached_identity(socket, recipient, identity) {
+        report_cache_warning(cache_warning, error);
+    }
+}
+
+fn report_cache_warning(
+    cache_warning: &mut impl FnMut(&str) -> std::io::Result<()>,
+    detail: impl std::fmt::Display,
+) {
+    let _ = cache_warning(&format!("macOS identity cache unavailable: {detail}"));
+}
+
+fn fetch_cached_identity(
+    socket: &Path,
+    recipient: &age::x25519::Recipient,
+) -> Result<Option<age::x25519::Identity>, String> {
+    let Some(mut stream) = connect_cache(socket)? else {
+        return Ok(None);
+    };
+    set_cache_timeouts(&stream)?;
+    let request = format!("get {recipient}\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|source| io_error("write identity cache request", source))?;
+    let reply = read_cache_line(&mut stream)?;
+    if reply.as_slice() == b"miss" {
+        return Ok(None);
+    }
+    if let Some(text) = reply.strip_prefix(b"ok ") {
+        let text = std::str::from_utf8(text)
+            .map_err(|_| "vault: identity cache returned an invalid reply".to_owned())?;
+        return parse_cached_identity(text, recipient).map(Some);
+    }
+    if let Some(detail) = reply.strip_prefix(b"err ") {
+        return Err(format!(
+            "vault: identity cache request failed: {}",
+            String::from_utf8_lossy(detail)
+        ));
+    }
+    Err("vault: identity cache returned an invalid reply".to_owned())
+}
+
+enum PutOutcome {
+    Stored,
+    NoDaemon,
+}
+
+fn store_cached_identity(
+    socket: &Path,
+    recipient: &age::x25519::Recipient,
+    identity: &age::x25519::Identity,
+) -> Result<(), String> {
+    match put_cached_identity(socket, recipient, identity)? {
+        PutOutcome::Stored => Ok(()),
+        PutOutcome::NoDaemon => {
+            spawn_cache_daemon(recipient, identity)?;
+            for _ in 0..CACHE_START_RETRIES {
+                match put_cached_identity(socket, recipient, identity)? {
+                    PutOutcome::Stored => return Ok(()),
+                    PutOutcome::NoDaemon => std::thread::sleep(CACHE_START_RETRY_INTERVAL),
+                }
+            }
+            Err("vault: identity cache daemon did not start".to_owned())
+        }
+    }
+}
+
+fn put_cached_identity(
+    socket: &Path,
+    recipient: &age::x25519::Recipient,
+    identity: &age::x25519::Identity,
+) -> Result<PutOutcome, String> {
+    let Some(mut stream) = connect_cache(socket)? else {
+        return Ok(PutOutcome::NoDaemon);
+    };
+    set_cache_timeouts(&stream)?;
+    let secret = identity.to_string();
+    let mut request = Zeroizing::new(format!("put {recipient} {}\n", secret.expose_secret()));
+    let result = stream
+        .write_all(request.as_bytes())
+        .map_err(|source| io_error("write identity cache request", source));
+    request.zeroize();
+    result?;
+    let reply = read_cache_line(&mut stream)?;
+    if reply.as_slice() == b"ok" {
+        Ok(PutOutcome::Stored)
+    } else if reply.strip_prefix(b"err ").is_some() {
+        Err("vault: identity cache refused the unlocked identity".to_owned())
+    } else {
+        Err("vault: identity cache returned an invalid reply".to_owned())
+    }
+}
+
+fn connect_cache(socket: &Path) -> Result<Option<UnixStream>, String> {
+    match UnixStream::connect(socket) {
+        Ok(stream) => Ok(Some(stream)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            remove_stale_socket(socket);
+            Ok(None)
+        }
+        Err(error) => Err(io_error("connect identity cache", error)),
+    }
+}
+
+fn set_cache_timeouts(stream: &UnixStream) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(CACHE_IO_TIMEOUT))
+        .map_err(|source| io_error("configure identity cache timeout", source))?;
+    stream
+        .set_write_timeout(Some(CACHE_IO_TIMEOUT))
+        .map_err(|source| io_error("configure identity cache timeout", source))
+}
+
+fn read_cache_line(stream: &mut UnixStream) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut line = Zeroizing::new(Vec::new());
+    let mut byte = [0u8; 1];
+    loop {
+        if line.len() > CACHE_LINE_MAX {
+            return Err("vault: identity cache line exceeds the maximum size".to_owned());
+        }
+        match stream.read(&mut byte) {
+            Ok(0) => return Err("vault: identity cache connection closed early".to_owned()),
+            Ok(_) => {
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    line.pop();
+                    return Ok(line);
+                }
+            }
+            Err(source) => return Err(io_error("read identity cache reply", source)),
+        }
+    }
+}
+
+fn parse_cached_identity(
+    text: &str,
+    recipient: &age::x25519::Recipient,
+) -> Result<age::x25519::Identity, String> {
+    let identity = age::x25519::Identity::from_str(text)
+        .map_err(|_| "vault: cached identity is not a valid age X25519 identity".to_owned())?;
+    validate_identity_recipient(&identity, recipient)?;
+    if identity.to_string().expose_secret() != text {
+        return Err("vault: cached identity is not in canonical form".to_owned());
+    }
+    Ok(identity)
+}
+
+fn remove_stale_socket(socket: &Path) {
+    if std::fs::symlink_metadata(socket)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_file(socket);
+    }
+}
+
+fn spawn_cache_daemon(
+    recipient: &age::x25519::Recipient,
+    identity: &age::x25519::Identity,
+) -> Result<(), String> {
+    let executable =
+        std::env::current_exe().map_err(|source| io_error("locate vault executable", source))?;
+    let mut command = Command::new(executable);
+    command.arg(CACHE_DAEMON_ARG);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    // SAFETY: setsid takes no pointer arguments and only detaches the child into its own session.
+    unsafe {
+        command.pre_exec(|| {
+            if setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|source| io_error("spawn identity cache daemon", source))?;
+    let secret = identity.to_string();
+    let seed = Zeroizing::new(format!("{recipient}\n{}\n", secret.expose_secret()));
+    if let Some(mut stdin) = child.stdin.take() {
+        let result = stdin
+            .write_all(seed.as_bytes())
+            .and_then(|()| stdin.flush());
+        drop(stdin);
+        result.map_err(|source| io_error("seed identity cache daemon", source))?;
+    }
+    Ok(())
+}
+
+fn read_daemon_seed() -> Result<(String, Zeroizing<String>), String> {
+    let mut raw = Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .lock()
+        .take(DAEMON_SEED_MAX)
+        .read_to_end(&mut raw)
+        .map_err(|source| io_error("read identity cache seed", source))?;
+    if raw.len() as u64 >= DAEMON_SEED_MAX {
+        return Err("vault: identity cache seed exceeds the maximum size".to_owned());
+    }
+    let mut parts = raw.split(|byte| *byte == b'\n');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(recipient), Some(identity), Some([]), None) => {
+            let recipient = seed_line(recipient)?;
+            let identity = seed_line(identity)?;
+            if recipient.is_empty() || identity.is_empty() {
+                return Err("vault: identity cache seed is missing the recipient or identity".to_owned());
+            }
+            Ok((recipient, Zeroizing::new(identity)))
+        }
+        _ => Err("vault: identity cache seed has an invalid format".to_owned()),
+    }
+}
+
+fn seed_line(line: &[u8]) -> Result<String, String> {
+    String::from_utf8(line.to_vec()).map_err(|error| {
+        let mut bytes = error.into_bytes();
+        bytes.zeroize();
+        "vault: identity cache seed is not valid UTF-8".to_owned()
+    })
+}
+
+enum CacheListener {
+    Bound(UnixListener),
+    Forwarded,
+}
+
+fn serve_cache(
+    socket: &Path,
+    mut recipient: String,
+    mut identity: age::x25519::Identity,
+    ttl: Duration,
+) -> Result<(), String> {
+    let listener = match bind_cache_listener(socket, &recipient, &identity)? {
+        CacheListener::Bound(listener) => listener,
+        CacheListener::Forwarded => return Ok(()),
+    };
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| io_error("configure identity cache listener", source))?;
+    let mut last_use = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if stream.set_nonblocking(false).is_ok() {
+                    match handle_cache_request(socket, &mut stream, &mut recipient, &mut identity) {
+                        CacheAction::Served => last_use = Instant::now(),
+                        CacheAction::Idle => {}
+                        CacheAction::Shutdown => {
+                            remove_stale_socket(socket);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_use.elapsed() >= ttl {
+                    remove_stale_socket(socket);
+                    return Ok(());
+                }
+                std::thread::sleep(CACHE_POLL_INTERVAL);
+            }
+            Err(error) => {
+                remove_stale_socket(socket);
+                return Err(io_error("accept identity cache connection", error));
+            }
+        }
+    }
+}
+
+fn bind_cache_listener(
+    socket: &Path,
+    recipient: &str,
+    identity: &age::x25519::Identity,
+) -> Result<CacheListener, String> {
+    match UnixListener::bind(socket) {
+        Ok(listener) => {
+            set_socket_permissions(socket)?;
+            Ok(CacheListener::Bound(listener))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if forward_to_running_daemon(socket, recipient, identity)? {
+                return Ok(CacheListener::Forwarded);
+            }
+            remove_stale_socket(socket);
+            let listener =
+                UnixListener::bind(socket).map_err(|source| io_error("bind identity cache socket", source))?;
+            set_socket_permissions(socket)?;
+            Ok(CacheListener::Bound(listener))
+        }
+        Err(error) => Err(io_error("bind identity cache socket", error)),
+    }
+}
+
+fn set_socket_permissions(socket: &Path) -> Result<(), String> {
+    if let Err(source) = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)) {
+        remove_stale_socket(socket);
+        return Err(io_error("restrict identity cache socket permissions", source));
+    }
+    Ok(())
+}
+
+fn forward_to_running_daemon(
+    socket: &Path,
+    recipient: &str,
+    identity: &age::x25519::Identity,
+) -> Result<bool, String> {
+    let parsed = age::x25519::Recipient::from_str(recipient)
+        .map_err(|_| "vault: cached recipient is not a valid age X25519 recipient".to_owned())?;
+    if parsed.to_string() != recipient {
+        return Err("vault: cached recipient is not in canonical form".to_owned());
+    }
+    let Some(mut stream) = connect_cache(socket)? else {
+        return Ok(false);
+    };
+    set_cache_timeouts(&stream)?;
+    let secret = identity.to_string();
+    let mut request = Zeroizing::new(format!("put {parsed} {}\n", secret.expose_secret()));
+    let result = stream
+        .write_all(request.as_bytes())
+        .map_err(|source| io_error("write identity cache request", source));
+    request.zeroize();
+    result?;
+    let reply = read_cache_line(&mut stream)?;
+    if reply.as_slice() == b"ok" {
+        Ok(true)
+    } else {
+        Err("vault: identity cache refused the unlocked identity".to_owned())
+    }
+}
+
+enum CacheAction {
+    Served,
+    Idle,
+    Shutdown,
+}
+
+fn handle_cache_request(
+    socket: &Path,
+    stream: &mut UnixStream,
+    recipient: &mut String,
+    identity: &mut age::x25519::Identity,
+) -> CacheAction {
+    if set_cache_timeouts(stream).is_err() {
+        return CacheAction::Idle;
+    }
+    let Ok(line) = read_cache_line(stream) else {
+        return CacheAction::Idle;
+    };
+    if line.as_slice() == b"lock" {
+        remove_stale_socket(socket);
+        let _ = stream.write_all(b"ok\n");
+        return CacheAction::Shutdown;
+    }
+    if let Some(want) = line.strip_prefix(b"get ") {
+        if want == recipient.as_bytes() {
+            let secret = identity.to_string();
+            let mut reply = Zeroizing::new(format!("ok {}\n", secret.expose_secret()));
+            let result = stream.write_all(reply.as_bytes());
+            reply.zeroize();
+            if result.is_ok() {
+                return CacheAction::Served;
+            }
+            return CacheAction::Idle;
+        }
+        let _ = stream.write_all(b"miss\n");
+        return CacheAction::Idle;
+    }
+    if let Some(payload) = line.strip_prefix(b"put ") {
+        match parse_put_payload(payload) {
+            Ok((new_recipient, new_identity)) => {
+                *recipient = new_recipient;
+                *identity = new_identity;
+                let _ = stream.write_all(b"ok\n");
+                return CacheAction::Served;
+            }
+            Err(_) => {
+                let _ = stream.write_all(b"err invalid identity\n");
+                return CacheAction::Idle;
+            }
+        }
+    }
+    let _ = stream.write_all(b"err unknown request\n");
+    CacheAction::Idle
+}
+
+fn parse_put_payload(payload: &[u8]) -> Result<(String, age::x25519::Identity), String> {
+    let mut parts = payload.split(|byte| *byte == b' ');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(recipient), Some(identity), None) => {
+            let recipient_text = std::str::from_utf8(recipient)
+                .map_err(|_| "vault: cached recipient is not valid UTF-8".to_owned())?;
+            let identity_text = std::str::from_utf8(identity)
+                .map_err(|_| "vault: cached identity is not valid UTF-8".to_owned())?;
+            let recipient = parse_recipient(format!("{recipient_text}\n").as_bytes())?;
+            let identity = parse_cached_identity(identity_text, &recipient)?;
+            Ok((recipient.to_string(), identity))
+        }
+        _ => Err("vault: identity cache request has an invalid format".to_owned()),
+    }
 }
 
 fn initialize_store(
@@ -836,7 +1350,9 @@ mod tests {
         create_staging_directory, data_home_from, decode_secret_filename, initialize_store,
         open_data_home, open_store, read_age_values, recover_at,
         secret_filename, set_secret_at, validate_store_name,
-        PRIVATE_DIRECTORY_MODE, validate_recovery_identity,
+        PRIVATE_DIRECTORY_MODE, validate_recovery_identity, CacheClearResult,
+        cache_socket_path, clear_identity_cache_at, fetch_cached_identity,
+        serve_cache, store_cached_identity,
     };
     use age::secrecy::SecretString;
     use std::ffi::OsString;
@@ -963,7 +1479,7 @@ mod tests {
         assert_ne!(new_sidecar, old_sidecar);
         let data = open_data_home(test_dir.path(), false).unwrap().unwrap();
         let store = open_store(&data).unwrap().unwrap();
-        let values = read_age_values(&store, &["DUMMY"]).unwrap();
+        let values = read_age_values(&store, &["DUMMY"], None, &mut |_| Ok(())).unwrap();
         assert_eq!(values[0].as_str(), "disposable file-backed Secure Enclave value");
     }
 
@@ -1000,4 +1516,104 @@ mod tests {
         }
     }
 
+    fn wait_for_daemon(socket: &std::path::Path) {
+        for _ in 0..200 {
+            if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("identity cache daemon did not bind {}", socket.display());
+    }
+
+    #[test]
+    fn identity_cache_serves_matching_recipients_until_lock() {
+        let test_dir = TestDir::new();
+        let socket = test_dir.path().join("cache.sock");
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let recipient_text = recipient.to_string();
+        let connect = socket.clone();
+        std::thread::spawn(move || {
+            serve_cache(&connect, recipient_text, identity, std::time::Duration::from_secs(10)).unwrap();
+        });
+        wait_for_daemon(&socket);
+
+        let hit = fetch_cached_identity(&socket, &recipient).unwrap();
+        assert!(hit.is_some());
+
+        let other = age::x25519::Identity::generate().to_public();
+        assert!(fetch_cached_identity(&socket, &other).unwrap().is_none());
+
+        let replacement = age::x25519::Identity::generate();
+        let replacement_recipient = replacement.to_public();
+        store_cached_identity(&socket, &replacement_recipient, &replacement).unwrap();
+        assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_none());
+        let hit = fetch_cached_identity(&socket, &replacement_recipient).unwrap().unwrap();
+        assert_eq!(hit.to_public().to_string(), replacement_recipient.to_string());
+
+        assert!(matches!(
+            clear_identity_cache_at(&socket).unwrap(),
+            CacheClearResult::Cleared
+        ));
+        assert!(!socket.exists());
+        assert!(matches!(
+            clear_identity_cache_at(&socket).unwrap(),
+            CacheClearResult::AlreadyClear
+        ));
+    }
+
+    #[test]
+    fn identity_cache_expires_after_inactivity() {
+        let test_dir = TestDir::new();
+        let socket = test_dir.path().join("cache.sock");
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let recipient_text = recipient.to_string();
+        let connect = socket.clone();
+        std::thread::spawn(move || {
+            serve_cache(
+                &connect,
+                recipient_text,
+                identity,
+                std::time::Duration::from_millis(100),
+            )
+            .unwrap();
+        });
+        wait_for_daemon(&socket);
+        assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_some());
+
+        for _ in 0..200 {
+            if !socket.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!socket.exists());
+        assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_cache_socket_is_removed_without_prompting() {
+        let test_dir = TestDir::new();
+        let socket = test_dir.path().join("cache.sock");
+        let recipient = age::x25519::Identity::generate().to_public();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        drop(listener);
+        assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_none());
+        assert!(!socket.exists());
+        assert!(matches!(
+            clear_identity_cache_at(&socket).unwrap(),
+            CacheClearResult::AlreadyClear
+        ));
+    }
+
+    #[test]
+    fn cache_socket_path_rejects_overlong_store_paths() {
+        assert!(cache_socket_path(std::path::Path::new("/tmp")).is_some());
+        let long = PathBuf::from("/tmp").join("x".repeat(200));
+        assert!(cache_socket_path(&long).is_none());
+    }
+
 }
+
