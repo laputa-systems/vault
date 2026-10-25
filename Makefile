@@ -15,7 +15,7 @@ install: dist
 	cp target/$(TARGET)/dist/$(NAME) $(PREFIX)/bin/$(NAME)
 
 dist:
-	cargo clean -p $(NAME) --release --target $(TARGET)
+	cargo clean -p $(NAME) --profile dist --target $(TARGET)
 	RUSTFLAGS="-Zlocation-detail=none -Zshare-generics=y -Zunstable-options -Cpanic=immediate-abort -Cforce-unwind-tables=n -Clink-arg=-Wl,-x $(MUSL_LINK_FLAGS)" \
 	cargo build --profile dist \
 	  -Z build-std=std \
