@@ -59,3 +59,16 @@ jobs:
               cargo clippy --all-targets --all-features -- --deny warnings
               cargo test
             '
+
+  ci:
+    name: CI
+    needs: linux-musl
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+    steps:
+      - run: echo "Linux musl matrix passed"
