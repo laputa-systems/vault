@@ -4,10 +4,13 @@
 
 ## Install
 
-Download the `vault-<version>-<target>` executable for your platform from
-[GitHub Releases](https://github.com/laputa-systems/vault/releases) and put it
-on your `PATH`. Linux binaries are statically linked (musl) with no runtime
-dependencies.
+Download a prerelease from
+[GitHub Releases](https://github.com/laputa-systems/vault/releases). The tag is
+`release-<commit>`. The assets are `vault-aarch64-apple-darwin.zip`,
+`vault-aarch64-unknown-linux-musl.zip`, `vault-x86_64-unknown-linux-musl.zip`,
+and `SHA256SUMS`. Unzip the archive for your machine, check it against
+`SHA256SUMS`, and put the executable on your `PATH`. The file inside the zip
+has the same name as the archive. Linux executables are static musl binaries.
 
 ## Store and retrieve secrets
 
@@ -73,22 +76,21 @@ revoke an identity already in the cache.
 
 ## Limits
 
-Secret values are limited to 16 MiB. Secret names and public recipient metadata
-are visible. On macOS, another same-user process can copy the opaque sidecar and
-request its own device-owner authentication. Within 15 minutes of a read, it
-can also read the cached identity from the daemon without authenticating.
-On Linux, the user-session
-keyring is shared across independent sessions for the same UID. A process with
-access can read and retain the complete decrypted identity beyond its
-15-minute keyring timeout. `vault lock` removes the store's cached identity but
-cannot erase copies already made or guarantee physical erasure. A same-user
-process with write access to the Linux store can replace its public recipient
-and redirect later passphrase-free writes. Removing a secret does not securely
-erase storage media. `get` prints secrets to stdout; exec mode places them in
-child environment variables, which other same-user processes may be able to
-inspect.
-
-Run `vault --help` for the command summary.
+Secret values are limited to 16 MiB and must be valid UTF-8. Secret names and
+public recipient metadata are visible. On macOS, another same-user process can
+copy the opaque sidecar and request its own device-owner authentication. Within
+15 minutes of a read, it can also read the cached identity from the daemon
+without authenticating. On Linux, the user-session keyring is shared across
+independent sessions for the same UID. A process with access can read and
+retain the complete decrypted identity beyond its 15-minute keyring timeout.
+`vault lock` removes the store's cached identity but cannot erase copies
+already made or guarantee physical erasure. A same-user process with write
+access to the store can replace the public recipient and redirect a later write.
+That write does not ask for the passphrase or for device-owner authentication.
+Reads then fail until the recipient matches the identity again. Removing a
+secret does not securely erase storage media. `get` prints secrets to stdout.
+Exec mode places them in child environment variables, which other same-user
+processes may be able to inspect.
 
 ## License
 
