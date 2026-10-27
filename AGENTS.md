@@ -14,7 +14,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
 - macOS stores age ciphertexts beside a Secure Enclave wrapped X25519 identity and a separate age-encrypted recovery identity.
 - Linux stores age ciphertexts under a passphrase-encrypted X25519 identity. Cache behavior and the same-UID trust boundary are in [README.md](README.md).
-- macOS reads unwrap the Secure Enclave identity. Writes on an existing store encrypt to the recipient file and do not unwrap it. Secret values stay in the age store.
+- macOS reads unwrap the Secure Enclave identity. An existing-store write uses the cached identity when its public key is the recipient file, and otherwise unwraps the Secure Enclave identity. The write fails when that public key does not match the recipient. Secret values stay in the age store.
 - Limit secret values to 16 MiB and never log or write plaintext secret values to disk.
 - Do not use the retired Keychain services `dev.joshuarli.vault.secure` and `dev.joshuarli.vault`.
 - In exec mode, parse `--` between environment specs and the command; only nonempty `NAME=VALUE` strings with exactly one `=` are literal.
@@ -25,4 +25,4 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
 - Why vault avoids the macOS Keychain: [docs/keychain.md](docs/keychain.md)
 - macOS storage harnesses: [tests/security_macos/README.md](tests/security_macos/README.md)
-- Whether an existing-store write may trust `recipient`: [docs/rfc/VLT-1-recipient-write.md](docs/rfc/VLT-1-recipient-write.md)
+- Existing-store writes encrypt only to an identity that matches `recipient`: [docs/rfc/VLT-1-recipient-write.md](docs/rfc/VLT-1-recipient-write.md)

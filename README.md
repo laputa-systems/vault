@@ -85,9 +85,12 @@ independent sessions for the same UID. A process with access can read and
 retain the complete decrypted identity beyond its 15-minute keyring timeout.
 `vault lock` removes the store's cached identity but cannot erase copies
 already made or guarantee physical erasure. A same-user process with write
-access to the store can replace the public recipient and redirect a later write.
-That write does not ask for the passphrase or for device-owner authentication.
-Reads then fail until the recipient matches the identity again. Removing a
+access to the store can replace the public recipient. A later write uses a cached
+identity only when its public key is that recipient. Otherwise it asks for the
+master passphrase on Linux, or for device-owner authentication on macOS, and
+fails without writing a secret or replacing the recipient when the unlocked
+identity does not match. Reads fail until the recipient matches the identity
+again. Removing a
 secret does not securely erase storage media. `get` prints secrets to stdout.
 Exec mode places them in child environment variables, which other same-user
 processes may be able to inspect.

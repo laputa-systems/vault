@@ -114,8 +114,25 @@ fn set_secret_at(
     if let Some(store) = open_store(&data)? {
         let recipient = read_recipient(&store.root)?;
         validate_recovery_identity(&store.root)?;
-        read_secure_enclave_sidecar(&store.root)?;
-        let ciphertext = encrypt_secret(&recipient, value)
+        let sidecar = read_secure_enclave_sidecar(&store.root)?;
+        let identity = match try_cached_identity(
+            cache_socket_path(data_home).as_deref(),
+            &recipient,
+            &mut |_| Ok(()),
+        ) {
+            Some(identity) => identity,
+            None => identity_from_bytes(
+                unwrap_identity(
+                    &sidecar,
+                    &identity_binding(&recipient),
+                    Interaction::MayPrompt,
+                )
+                .map_err(format_secure_enclave_error)?,
+            )?,
+        };
+        validate_identity_recipient(&identity, &recipient)?;
+        let public_key = identity.to_public();
+        let ciphertext = encrypt_secret(&public_key, value)
             .map_err(|_| format!("vault: {name}: encryption failed"))?;
         if ciphertext.len() > MAX_SECRET_CIPHERTEXT {
             return Err(format!("vault: {name}: encrypted secret exceeds the storage limit"));
@@ -1354,11 +1371,12 @@ mod tests {
         cache_socket_path, clear_identity_cache_at, fetch_cached_identity,
         serve_cache, store_cached_identity,
     };
-    use age::secrecy::SecretString;
+    use age::secrecy::{ExposeSecret, SecretString};
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::str::FromStr;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
@@ -1514,6 +1532,100 @@ mod tests {
             assert!(error.contains("recovery identity") || error.contains("encrypted identity is malformed"));
             assert!(!secrets.join(secret_filename("NEW").unwrap()).exists());
         }
+    }
+
+    fn framed_sidecar() -> Vec<u8> {
+        let key_len: u32 = 1;
+        let ephemeral_len: u32 = 65;
+        let sealed_len: u32 = 28;
+        let mut sidecar = b"VLTSE\x01".to_vec();
+        for length in [key_len, ephemeral_len, sealed_len] {
+            sidecar.extend(length.to_be_bytes());
+        }
+        sidecar.resize(sidecar.len() + (key_len + ephemeral_len + sealed_len) as usize, 0);
+        sidecar
+    }
+
+    #[test]
+    fn set_secret_uses_a_matching_cache_without_secure_enclave_unwrap() {
+        let test_dir = TestDir::new();
+        let socket = cache_socket_path(test_dir.path()).expect("test store cache socket path must fit");
+        let store = test_dir.path().join(STORE_NAME);
+        let secrets = store.join("secrets");
+        fs::create_dir(&store).unwrap();
+        fs::create_dir(&secrets).unwrap();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let private_key = identity.to_string();
+        let private_key_text = private_key.expose_secret().to_owned();
+        let mut recovery_bytes = private_key.expose_secret().as_bytes().to_vec();
+        recovery_bytes.push(b'\n');
+        let encrypted_identity = crate::store::encrypt_identity(
+            &recovery_bytes,
+            SecretString::from("disposable recovery passphrase".to_owned()),
+        )
+        .unwrap();
+        let sidecar = framed_sidecar();
+        super::validate_sidecar(&sidecar).unwrap();
+        fs::write(store.join("recipient"), format!("{recipient}\n")).unwrap();
+        fs::write(store.join("identity.age"), encrypted_identity).unwrap();
+        fs::write(store.join(SECURE_ENCLAVE_NAME), sidecar).unwrap();
+
+        let recipient_text = recipient.to_string();
+        let connect = socket.clone();
+        std::thread::spawn(move || {
+            serve_cache(
+                &connect,
+                recipient_text,
+                identity,
+                std::time::Duration::from_secs(30),
+            )
+            .unwrap();
+        });
+        wait_for_daemon(&socket);
+        assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_some());
+
+        let write = set_secret_at(test_dir.path(), "TOKEN", b"from-cache", |_| {
+            panic!("a warm matching cache does not ask for the recovery passphrase")
+        });
+        let _ = clear_identity_cache_at(&socket);
+        write.unwrap();
+
+        let ciphertext = fs::read(secrets.join(secret_filename("TOKEN").unwrap())).unwrap();
+        let restored = age::x25519::Identity::from_str(&private_key_text).unwrap();
+        assert_eq!(age::decrypt(&restored, &ciphertext).unwrap(), b"from-cache");
+    }
+
+    #[test]
+    fn set_secret_does_not_publish_a_planted_recipient() {
+        let test_dir = TestDir::new();
+        let store = test_dir.path().join(STORE_NAME);
+        let secrets = store.join("secrets");
+        fs::create_dir(&store).unwrap();
+        fs::create_dir(&secrets).unwrap();
+        let planted = age::x25519::Identity::generate();
+        let recipient_text = format!("{}\n", planted.to_public());
+        let sidecar = framed_sidecar();
+        super::validate_sidecar(&sidecar).unwrap();
+        let encrypted_identity = crate::store::encrypt_identity(
+            b"not-the-planted-identity\n",
+            SecretString::from("disposable recovery passphrase".to_owned()),
+        )
+        .unwrap();
+        fs::write(store.join("recipient"), &recipient_text).unwrap();
+        fs::write(store.join("identity.age"), encrypted_identity).unwrap();
+        fs::write(store.join(SECURE_ENCLAVE_NAME), sidecar).unwrap();
+        let previous = secrets.join(secret_filename("TOKEN").unwrap());
+        fs::write(&previous, b"previous").unwrap();
+
+        let error = set_secret_at(test_dir.path(), "NEW", b"value", |_| {
+            panic!("an existing store does not ask for a recovery passphrase")
+        })
+        .unwrap_err();
+        assert!(error.contains("Secure Enclave"));
+        assert!(!secrets.join(secret_filename("NEW").unwrap()).exists());
+        assert_eq!(fs::read(&previous).unwrap(), b"previous");
+        assert_eq!(fs::read(store.join("recipient")).unwrap(), recipient_text.as_bytes());
     }
 
     fn wait_for_daemon(socket: &std::path::Path) {

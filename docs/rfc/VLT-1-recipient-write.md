@@ -1,6 +1,6 @@
 # VLT-1: Existing-store writes trust the recipient file
 
-Status: draft
+Status: accepted
 
 ## Summary
 
@@ -39,4 +39,4 @@ Should a mismatched recipient fail the write, or should vault rewrite `recipient
 
 ## Decision
 
-No decision yet. The ticket recommends a prompt on a cold cache, a failed write when the recipient does not match, and no rewrite of `recipient` in this change.
+Existing-store writes use the cached identity when its public key is the recipient file. Otherwise they unlock: Linux asks for the master passphrase, and macOS unwraps the Secure Enclave sidecar with `Interaction::MayPrompt`. If that identity's public key is not the recipient file, the write returns an error and leaves the store unchanged, including `recipient`. A warm cache whose recipient still matches does not prompt. A cold cache prompts. Read validation is unchanged.

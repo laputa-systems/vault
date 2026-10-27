@@ -169,7 +169,9 @@ fn set_secret_at(
 
     if let Some(store) = open_store(&data)? {
         let recipient = validate_store_for_write(&store)?;
-        let ciphertext = encrypt_secret(&recipient, value)
+        let identity = identity_for_existing_write(&data, &store, &recipient, prompt)?;
+        let public_key = identity.to_public();
+        let ciphertext = encrypt_secret(&public_key, value)
             .map_err(|_| format!("vault: {name}: encryption failed"))?;
         if ciphertext.len() > MAX_SECRET_CIPHERTEXT {
             return Err(format!("vault: {name}: encrypted secret exceeds the storage limit"));
@@ -464,6 +466,22 @@ fn verify_file_mode(file: &File, expected: u32, label: &str) -> Result<(), Strin
         return Err(format!("vault: {label} permissions must be {expected:04o}"));
     }
     Ok(())
+}
+
+fn identity_for_existing_write(
+    data: &File,
+    store: &Store,
+    recipient: &age::x25519::Recipient,
+    prompt: &mut impl FnMut(PassphrasePrompt) -> Result<SecretString, String>,
+) -> Result<age::x25519::Identity, String> {
+    if let Ok(Some(identity)) = read_cached_identity(data, recipient) {
+        return Ok(identity);
+    }
+    let encrypted_identity = read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT)
+        .map_err(|error| format!("vault: cannot read encrypted identity: {error}"))?;
+    let identity = decrypt_identity(&encrypted_identity, prompt(PassphrasePrompt::Unlock)?)?;
+    validate_identity_recipient(&identity, recipient)?;
+    Ok(identity)
 }
 
 fn validate_store_for_write(store: &Store) -> Result<age::x25519::Recipient, String> {
@@ -1183,6 +1201,13 @@ mod tests {
         }
     }
 
+    fn unlock_master(value: &'static str) -> impl FnMut(PassphrasePrompt) -> Result<SecretString, String> {
+        move |kind| {
+            assert!(matches!(kind, PassphrasePrompt::Unlock));
+            Ok(passphrase(value))
+        }
+    }
+
     #[test]
     fn data_home_uses_absolute_xdg_and_ignores_relative_values() {
         assert_eq!(
@@ -1234,10 +1259,8 @@ mod tests {
         let secrets = temp.path().join(STORE_NAME).join(SECRETS_NAME);
         let unrelated_temp = secrets.join(".tmp-user-data");
         fs::write(&unrelated_temp, b"keep this too").unwrap();
-        set_secret_at(temp.path(), "SECOND", b"second", &mut |_| {
-            panic!("initialized writes do not prompt")
-        })
-        .unwrap();
+        set_secret_at(temp.path(), "SECOND", b"second", &mut unlock_master("a passphrase with spaces"))
+            .unwrap();
 
         assert_eq!(fs::read(unrelated_stage.join("keep")).unwrap(), b"keep me");
         assert_eq!(fs::read(unrelated_temp).unwrap(), b"keep this too");
@@ -1276,16 +1299,23 @@ mod tests {
     }
 
     #[test]
-    fn first_set_encrypts_standard_age_files_and_later_sets_do_not_prompt() {
+    fn first_set_encrypts_standard_age_files_and_a_cold_cache_prompts() {
         let temp = TestDir::new();
         initialize(temp.path());
-        set_secret_at(temp.path(), "TOKEN", b"second", &mut |_| {
-            panic!("initialized writes do not request the passphrase")
+        let mut prompted = false;
+        set_secret_at(temp.path(), "TOKEN", b"second", &mut |kind| {
+            assert!(matches!(kind, PassphrasePrompt::Unlock));
+            prompted = true;
+            Ok(passphrase("a passphrase with spaces"))
         })
         .unwrap();
-        set_secret_at(temp.path(), "DATABASE_URL", b"postgres://user:secret@db", &mut |_| {
-            panic!("initialized writes do not request the passphrase")
-        })
+        assert!(prompted);
+        set_secret_at(
+            temp.path(),
+            "DATABASE_URL",
+            b"postgres://user:secret@db",
+            &mut unlock_master("a passphrase with spaces"),
+        )
         .unwrap();
 
         let store = open_store(&open_data_home(temp.path(), false).unwrap().unwrap())
@@ -1359,6 +1389,10 @@ mod tests {
         };
         assert!(!timeout.is_zero() && timeout <= IDENTITY_CACHE_TTL);
         assert!(read_cached_identity(&data, &recipient).unwrap().is_some());
+        set_secret_at(temp.path(), "CACHED", b"cached", &mut |_| {
+            panic!("a warm cache whose recipient matches does not prompt")
+        })
+        .unwrap();
 
         let encrypted_identity =
             read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT).unwrap();
@@ -1455,14 +1489,26 @@ mod tests {
             assert!(read_cached_identity(&first_data, &original_recipient).unwrap().is_some());
             assert!(read_cached_identity(&first_data, &replacement_recipient).unwrap().is_none());
         }
-        set_secret_at(first.path(), "REDIRECTED", b"redirected value", &mut |_| {
-            panic!("recipient-based writes do not unlock the identity")
+        let token_before = fs::read(first.path().join(STORE_NAME).join(SECRETS_NAME).join("TOKEN.age")).unwrap();
+        let mut prompted = false;
+        let error = set_secret_at(first.path(), "REDIRECTED", b"redirected value", &mut |kind| {
+            assert!(matches!(kind, PassphrasePrompt::Unlock));
+            prompted = true;
+            Ok(passphrase("a passphrase with spaces"))
         })
-        .unwrap();
-        let redirected = read_private_file(&first_store.secrets, "REDIRECTED.age", MAX_SECRET_CIPHERTEXT).unwrap();
-        assert_eq!(age::decrypt(&replacement_identity, &redirected).unwrap(), b"redirected value");
+        .unwrap_err();
+        assert!(prompted);
+        assert!(error.contains("does not match the encrypted identity"));
+        assert!(!first.path().join(STORE_NAME).join(SECRETS_NAME).join("REDIRECTED.age").exists());
+        assert_eq!(fs::read(first.path().join(STORE_NAME).join(SECRETS_NAME).join("TOKEN.age")).unwrap(), token_before);
+        assert_eq!(
+            fs::read(first.path().join(STORE_NAME).join(RECIPIENT_NAME)).unwrap(),
+            recipient_text.as_bytes()
+        );
+        assert!(age::decrypt(&replacement_identity, &token_before).is_err());
 
         if cache_available {
+            assert!(read_cached_identity(&first_data, &original_recipient).unwrap().is_some());
             assert!(matches!(
                 remove_cached_identity(&first_data).unwrap(),
                 CacheClearResult::Cleared
@@ -1477,6 +1523,37 @@ mod tests {
         } else {
             eprintln!("skipped cache scope assertions: kernel identity cache is unavailable");
         }
+    }
+
+    #[test]
+    fn planted_recipient_rejects_the_write_and_keeps_the_previous_secret() {
+        let temp = TestDir::new();
+        initialize(temp.path());
+        let data = open_data_home(temp.path(), false).unwrap().unwrap();
+        let store = open_store(&data).unwrap().unwrap();
+        let secret_path = temp.path().join(STORE_NAME).join(SECRETS_NAME).join("TOKEN.age");
+        let token_before = fs::read(&secret_path).unwrap();
+        let planted = age::x25519::Identity::generate();
+        let recipient_text = format!("{}\n", planted.to_public());
+        atomic_write(&store.root, RECIPIENT_NAME, recipient_text.as_bytes()).unwrap();
+
+        let mut prompted = false;
+        let error = set_secret_at(temp.path(), "REDIRECTED", b"redirected value", &mut |kind| {
+            assert!(matches!(kind, PassphrasePrompt::Unlock));
+            prompted = true;
+            Ok(passphrase("a passphrase with spaces"))
+        })
+        .unwrap_err();
+        assert!(prompted);
+        assert!(error.contains("does not match the encrypted identity"));
+        assert!(!temp.path().join(STORE_NAME).join(SECRETS_NAME).join("REDIRECTED.age").exists());
+        assert_eq!(fs::read(&secret_path).unwrap(), token_before);
+        assert_eq!(fs::read(temp.path().join(STORE_NAME).join(RECIPIENT_NAME)).unwrap(), recipient_text.as_bytes());
+        let encrypted_identity = read_private_file(&store.root, IDENTITY_NAME, MAX_IDENTITY_CIPHERTEXT).unwrap();
+        let identity = decrypt_identity(&encrypted_identity, passphrase("a passphrase with spaces")).unwrap();
+        assert_eq!(age::decrypt(&identity, &token_before).unwrap(), b"first");
+        assert!(age::decrypt(&planted, &token_before).is_err());
+        assert_eq!(list_secrets_at(temp.path()).unwrap(), ["TOKEN"]);
     }
 
     #[test]
@@ -1501,10 +1578,8 @@ mod tests {
             ("MULTILINE", "first line\nsecond line"),
             ("UNICODE", "café 🔐"),
         ] {
-            set_secret_at(temp.path(), name, value.as_bytes(), &mut |_| {
-                panic!("initialized writes do not request the passphrase")
-            })
-            .unwrap();
+            set_secret_at(temp.path(), name, value.as_bytes(), &mut unlock_master("a passphrase with spaces"))
+                .unwrap();
         }
 
         assert_eq!(
@@ -1524,13 +1599,15 @@ mod tests {
         initialize(temp.path());
         let error = get_secrets_at(temp.path(), &["TOKEN"], unlock("wrong")).unwrap_err();
         assert!(error.contains("incorrect or the encrypted identity is damaged"));
-        let mut prompted = false;
-        let error = set_secret_at(temp.path(), "TOKEN", b"replacement", &mut |_| {
-            prompted = true;
+        let secret_path = temp.path().join(STORE_NAME).join(SECRETS_NAME).join("TOKEN.age");
+        let original = fs::read(&secret_path).unwrap();
+        let error = set_secret_at(temp.path(), "TOKEN", b"replacement", &mut |kind| {
+            assert!(matches!(kind, PassphrasePrompt::Unlock));
             Ok(passphrase("wrong"))
-        });
-        assert!(error.is_ok());
-        assert!(!prompted);
+        })
+        .unwrap_err();
+        assert!(error.contains("incorrect or the encrypted identity is damaged"));
+        assert_eq!(fs::read(secret_path).unwrap(), original);
     }
 
     #[test]
@@ -1609,10 +1686,8 @@ mod tests {
         let secret_path = temp.path().join(STORE_NAME).join(SECRETS_NAME).join("TOKEN.age");
         let original = fs::read(&secret_path).unwrap();
         fs::hard_link(&secret_path, temp.path().join("TOKEN-hardlink")).unwrap();
-        let error = set_secret_at(temp.path(), "TOKEN", b"replacement", &mut |_| {
-            panic!("initialized writes do not prompt")
-        })
-        .unwrap_err();
+        let error = set_secret_at(temp.path(), "TOKEN", b"replacement", &mut unlock_master("a passphrase with spaces"))
+            .unwrap_err();
         assert!(error.contains("unexpected hard link"));
         assert_eq!(fs::read(secret_path).unwrap(), original);
     }
@@ -1719,7 +1794,7 @@ mod tests {
     fn purge_removes_valid_secrets_but_keeps_identity() {
         let temp = TestDir::new();
         initialize(temp.path());
-        set_secret_at(temp.path(), "SECOND", b"two", &mut |_| panic!("no prompt")).unwrap();
+        set_secret_at(temp.path(), "SECOND", b"two", &mut unlock_master("a passphrase with spaces")).unwrap();
         assert_eq!(purge_secrets_at(temp.path()).unwrap(), 2);
         assert!(list_secrets_at(temp.path()).unwrap().is_empty());
         assert!(temp.path().join(STORE_NAME).join(IDENTITY_NAME).is_file());
