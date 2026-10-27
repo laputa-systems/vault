@@ -1,6 +1,6 @@
 NAME   := vault
 TARGET := $(shell rustc -vV | awk '/^host:/ {print $$2}')
-PREFIX ?= $(HOME)/usr
+PREFIX ?= $(HOME)/.local
 
 SIGN_ID ?= -
 OS := $(shell uname -s)

@@ -8,7 +8,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - Test: `cargo test`; Secure Enclave authentication tests are ignored by default.
 - Check: `cargo clippy --all-targets --all-features -- --deny warnings`
 - Release: `make dist` uses the pinned nightly and `rust-src`.
-- Install: `make install` installs to `~/usr/bin`; set `PREFIX` to change the path. macOS requires Swift and Command Line Tools and signs ad hoc unless `SIGN_ID` is set.
+- Install: `make install` installs to `~/.local/bin`; set `PREFIX` to change the path. macOS requires Swift and Command Line Tools and signs ad hoc unless `SIGN_ID` is set.
 
 ## Invariants
 
