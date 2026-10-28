@@ -7,7 +7,7 @@ OS := $(shell uname -s)
 MUSL_LINK_FLAGS := $(if $(findstring linux-musl,$(TARGET)),-C link-arg=-fuse-ld=mold,)
 
 lint:
-	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
+	cargo clippy --all-targets --all-features -- --deny warnings
 
 install: dist
 	$(if $(filter Darwin,$(OS)),codesign --sign "$(SIGN_ID)" --force --timestamp=none target/$(TARGET)/dist/$(NAME),:)
