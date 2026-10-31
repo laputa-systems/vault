@@ -4,16 +4,12 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+age = { path = "../rage/age", default-features = false }
 rustix = { version = "1", features = ["fs", "process", "termios"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-age = { version = "0.12.1", default-features = false }
 zeroize = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-age = { version = "0.12.1", default-features = false }
 libc = "0.2"
-zeroize = "1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { version = "1", features = ["process", "stdio"] }
