@@ -489,19 +489,37 @@ mod unix_pty {
             .windows(b"pipe-secret".len())
             .any(|window| window == b"pipe-secret"));
 
-        let mut second_set = launch_headless(
+        let (mut master, slave) = open_pty().unwrap();
+        let (sender, chunks) = mpsc::channel();
+        let reader_fd = master.try_clone().unwrap();
+        let reader = thread::spawn(move || read_terminal_chunks(reader_fd, sender));
+        let mut second_set = launch_with_controlling_tty(
+            &slave,
             data_home.path(),
             &["isset", "DATABASE_URL"],
             Stdio::piped(),
         )
         .unwrap();
+        drop(slave);
         second_set
             .stdin
             .take()
             .unwrap()
             .write_all(b"database-secret")
             .unwrap();
+        let mut second_set_terminal_output = Vec::new();
+        wait_for_prompt(
+            &mut master,
+            &chunks,
+            &mut second_set_terminal_output,
+            "Master passphrase: ",
+            passphrase,
+        )
+        .unwrap();
         assert!(second_set.wait_with_output().unwrap().status.success());
+        drop(master);
+        finish_terminal_output(chunks, second_set_terminal_output).unwrap();
+        reader.join().unwrap();
 
         let headless_get = launch_headless(
             data_home.path(),

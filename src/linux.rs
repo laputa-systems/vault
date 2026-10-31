@@ -1766,24 +1766,33 @@ mod tests {
     fn concurrent_initialization_publishes_one_consistent_store() {
         let temp = TestDir::new();
         let barrier = Arc::new(Barrier::new(2));
-        let prompt_count = Arc::new(AtomicU64::new(0));
+        let create_count = Arc::new(AtomicU64::new(0));
+        let confirm_count = Arc::new(AtomicU64::new(0));
+        let unlock_count = Arc::new(AtomicU64::new(0));
         thread::scope(|scope| {
             for name in ["FIRST", "SECOND"] {
                 let barrier = Arc::clone(&barrier);
-                let prompt_count = Arc::clone(&prompt_count);
+                let create_count = Arc::clone(&create_count);
+                let confirm_count = Arc::clone(&confirm_count);
+                let unlock_count = Arc::clone(&unlock_count);
                 let path = temp.path().to_owned();
                 scope.spawn(move || {
                     barrier.wait();
                     set_secret_at(&path, name, name.as_bytes(), &mut |kind| {
-                        prompt_count.fetch_add(1, Ordering::SeqCst);
-                        assert!(matches!(kind, PassphrasePrompt::Create | PassphrasePrompt::Confirm));
+                        match kind {
+                            PassphrasePrompt::Create => create_count.fetch_add(1, Ordering::SeqCst),
+                            PassphrasePrompt::Confirm => confirm_count.fetch_add(1, Ordering::SeqCst),
+                            PassphrasePrompt::Unlock => unlock_count.fetch_add(1, Ordering::SeqCst),
+                        };
                         Ok(passphrase("concurrent passphrase"))
                     })
                     .unwrap();
                 });
             }
         });
-        assert_eq!(prompt_count.load(Ordering::SeqCst), 2);
+        assert_eq!(create_count.load(Ordering::SeqCst), 1);
+        assert_eq!(confirm_count.load(Ordering::SeqCst), 1);
+        assert_eq!(unlock_count.load(Ordering::SeqCst), 1);
         assert_eq!(
             get_secrets_at(temp.path(), &["FIRST", "SECOND"], unlock("concurrent passphrase")).unwrap(),
             ["FIRST", "SECOND"]
