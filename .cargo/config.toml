@@ -1,0 +1,5 @@
+[source.crates-io]
+replace-with = "stuff"
+
+[source.stuff]
+registry = "sparse+https://crates.17166969.xyz/current/crates-io/"
