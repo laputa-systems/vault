@@ -4,8 +4,8 @@
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 ARG TARGETARCH
-ARG LLVM_VERSION=23.1.0-rc2
-ARG LLVM_RELEASE_SHA=6eb5fb9
+ARG LLVM_VERSION=23.1.5
+ARG LLVM_RELEASE_SHA=4c2254e
 ARG RUSTUP_VERSION=1.29.1
 ARG RUSTUP_X86_64_SHA256=331228566cc931f32cd684f9bebc5956a5e5d7394c8d5de595f196a658ab98e6
 ARG RUSTUP_AARCH64_SHA256=1ddf36182ac5d1782dbeefcb9bea7f5f9412d88f4a0d5047b1564a223624e8c6
@@ -32,8 +32,8 @@ RUN ar rcs /usr/lib/libutil.a
 
 # LLVM tools must be musl-linked to run in this Alpine image.
 RUN case "$TARGETARCH" in \
-        amd64) arch=x86_64; sum=36647cca0bf57d206a6ce757d07a9d8489ef6ccf283a2cc7f740d1cba99a088b ;; \
-        arm64) arch=aarch64; sum=0c9bd6f0fefa26dbdb7d6ed568f3799b558428b1ce1264656aa328fc6fd9e32d ;; \
+        amd64) arch=x86_64; sum=9f599abd0caf81df64fdf70442ef2c39cb701d346030643193b39a743ad43ce0 ;; \
+        arm64) arch=aarch64; sum=187e71574399adaedd6077ffb5e4b20900aa29f32c3f131db2f4440273b75444 ;; \
         *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && archive=/vault/.work/tmp/llvm.tar.xz \
