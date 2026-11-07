@@ -29,3 +29,6 @@ lto = "fat"
 codegen-units = 1
 opt-level = 2
 strip = true
+
+[lints.clippy]
+disallowed_types = "deny"

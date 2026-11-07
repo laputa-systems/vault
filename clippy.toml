@@ -8,4 +8,6 @@ allow-useless-vec-in-tests = true
 disallowed-types = [
     "std::collections::HashMap",
     "std::collections::HashSet",
+    { path = "std::collections::BTreeMap", reason = "use rustc-hash 2.x for small integer-heavy maps, rapidhash::fast for general-purpose performance, or foldhash::fast with hashbrown" },
+    { path = "std::collections::BTreeSet", reason = "use rustc-hash 2.x for small integer-heavy sets, rapidhash::fast for general-purpose performance, or foldhash::fast with hashbrown" },
 ]
