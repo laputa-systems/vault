@@ -1,14 +1,14 @@
 # Builder image for Linux musl (statically linked) builds, tests, and releases.
 # Toolchain bump: edit rust-toolchain.toml only; this image reads the channel
 # from it. Bump LLVM_* and RUSTUP_VERSION (plus its checksums) separately.
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 ARG TARGETARCH
 ARG LLVM_VERSION=23.1.5
-ARG LLVM_RELEASE_SHA=c4f9b08
-ARG RUSTUP_VERSION=1.29.1
-ARG RUSTUP_X86_64_SHA256=331228566cc931f32cd684f9bebc5956a5e5d7394c8d5de595f196a658ab98e6
-ARG RUSTUP_AARCH64_SHA256=1ddf36182ac5d1782dbeefcb9bea7f5f9412d88f4a0d5047b1564a223624e8c6
+ARG LLVM_RELEASE_SHA=dc0d9b9
+ARG RUSTUP_VERSION=1.29.3
+ARG RUSTUP_X86_64_SHA256=1552169aba2836777136ccff7a381e95c17233b5d8250cd5e10ae3cb971bfcfc
+ARG RUSTUP_AARCH64_SHA256=956deacdc27ab82ae7ac821d5d3e9e95e4795d476d17efe99743bb8531ca1031
 
 # gcc provides the cc default linker used by vault's plain-cargo Makefile flow;
 # mold is required because the Makefile passes -fuse-ld=mold for musl targets.
@@ -22,7 +22,7 @@ RUN apk add --no-cache \
     strace=6.19-r1 \
     musl-dev=1.2.6-r3 \
     libgcc=15.2.0-r5 \
-    git=2.54.0-r0 \
+    git=2.54.1-r0 \
     tzdata=2026f-r0
 
 # Tests link libutil for Unix PTY support (openpty); musl provides those
@@ -32,8 +32,8 @@ RUN ar rcs /usr/lib/libutil.a
 
 # LLVM tools must be musl-linked to run in this Alpine image.
 RUN case "$TARGETARCH" in \
-        amd64) arch=x86_64; sum=8039dfa9e5b2ee53b04c1dcf94d65bd76c27842b0d4128c5a7bc6ba21d345fec ;; \
-        arm64) arch=aarch64; sum=7055513530fc60361e29d01d5c849d356b25e9e38124811a420970941dd32979 ;; \
+        amd64) arch=x86_64; sum=c43f18f143cc17f49814b6c5dda8a1122d17b6bcdff9848b6f77e97b33026dfe ;; \
+        arm64) arch=aarch64; sum=fe0a382993c36a04a505157b59503a7294db97e2ac9923e5630f8b393b78f118 ;; \
         *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && archive=/vault/.work/tmp/llvm.tar.xz \
