@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-age = { git = "https://github.com/laputa-systems/rage", rev = "13c664f179455bbaff9b4c56a6418df2b93d6ec8", default-features = false }
+age = { version = "0.13.0", registry = "mycrates", default-features = false }
 rustix = { version = "1", features = ["fs", "process", "termios"] }
 zeroize = "1"
 

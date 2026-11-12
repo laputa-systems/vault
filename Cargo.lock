@@ -14,8 +14,9 @@ dependencies = [
 
 [[package]]
 name = "age"
-version = "0.12.1"
-source = "git+https://github.com/laputa-systems/rage?rev=13c664f179455bbaff9b4c56a6418df2b93d6ec8#13c664f179455bbaff9b4c56a6418df2b93d6ec8"
+version = "0.13.0"
+source = "sparse+https://crates.17166969.xyz/current/registry/"
+checksum = "c037e27bd59ca0c001a573cd76aad86f751d0182646fa284c1f1495895fcec04"
 dependencies = [
  "age-core",
  "base64",
@@ -41,7 +42,8 @@ dependencies = [
 [[package]]
 name = "age-core"
 version = "0.13.0"
-source = "git+https://github.com/laputa-systems/rage?rev=13c664f179455bbaff9b4c56a6418df2b93d6ec8#13c664f179455bbaff9b4c56a6418df2b93d6ec8"
+source = "sparse+https://crates.17166969.xyz/current/registry/"
+checksum = "207e1bb2d5b3cfdeb4acdb347d6ab407bcc2faa4cec7994fba068f53f0ebb542"
 dependencies = [
  "base64",
  "bech32",
