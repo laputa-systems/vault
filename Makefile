@@ -6,6 +6,12 @@ SIGN_ID ?= -
 OS := $(shell uname -s)
 MUSL_LINK_FLAGS := $(if $(findstring linux-musl,$(TARGET)),-C link-arg=-fuse-ld=mold,)
 
+test:
+	cargo test
+
+test-ci:
+	docker run --rm --init --platform "$(PLATFORM)" -e CI -v "$(CURDIR):/vault" -w /vault "$(IMAGE)" make test
+
 lint:
 	cargo clippy --all-targets --all-features -- --deny warnings
 
@@ -34,4 +40,4 @@ verify-dist:
 		echo "Skipping ELF checks for $(TARGET)"; \
 	fi
 
-.PHONY: lint install dist verify-dist
+.PHONY: test test-ci lint install dist verify-dist
