@@ -53,7 +53,7 @@ jobs:
           load: true
           tags: vault-builder:${{ matrix.target }}
           cache-from: type=gha,scope=vault-${{ matrix.target }}
-      - name: Lint and test in image
+      - name: Lint in image
         run: |
           docker run --rm --init \
             --platform "${{ matrix.platform }}" \
@@ -63,8 +63,12 @@ jobs:
             vault-builder:${{ matrix.target }} \
             sh -ec '
               cargo clippy --all-targets --all-features -- --deny warnings
-              cargo test
             '
+      - name: Test in image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          IMAGE: vault-builder:${{ matrix.target }}
+        run: make test-ci
 
   ci:
     name: CI
