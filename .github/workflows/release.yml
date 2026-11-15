@@ -209,15 +209,15 @@ jobs:
               exit 1
             fi
           done
-          mkdir dist/zips
+          mkdir dist/archives
           for file in \
             dist/vault-aarch64-apple-darwin/vault-aarch64-apple-darwin \
             dist/vault-aarch64-unknown-linux-musl/vault-aarch64-unknown-linux-musl \
             dist/vault-x86_64-unknown-linux-musl/vault-x86_64-unknown-linux-musl; do
-            zip -9 --junk-paths "dist/zips/$(basename "$file").zip" "$file"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cJf "dist/archives/$(basename "$file").tar.xz" -C "$(dirname "$file")" "$(basename "$file")"
           done
-          cd dist/zips
-          sha256sum *.zip | LC_ALL=C sort -k2 > SHA256SUMS
+          cd dist/archives
+          sha256sum *.tar.xz | LC_ALL=C sort -k2 > SHA256SUMS
           sha256sum -c SHA256SUMS
       - name: Create release tag at triggering SHA
         env:
@@ -275,4 +275,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: release-${{ github.sha }}
-        run: gh release create "$RELEASE_TAG" dist/zips/*.zip dist/zips/SHA256SUMS --repo "$GITHUB_REPOSITORY" --prerelease --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag --title "$RELEASE_TAG"
+        run: gh release create "$RELEASE_TAG" dist/archives/*.tar.xz dist/archives/SHA256SUMS --repo "$GITHUB_REPOSITORY" --prerelease --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag --title "$RELEASE_TAG"
