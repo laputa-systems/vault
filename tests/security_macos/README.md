@@ -12,7 +12,7 @@ TMPDIR=.work/tmp cargo test --bin vault
 These ignored tests require Secure Enclave hardware and may request device-owner authentication:
 
 ```sh
-TMPDIR=.work/tmp cargo test --bin vault secure_enclave_wrap_denies_noninteractive_access_and_unlocks_age_identity -- --ignored --exact --nocapture
+TMPDIR=.work/tmp cargo test --bin vault secure_enclave::tests::secure_enclave_wrap_denies_noninteractive_access_and_unlocks_age_identity -- --ignored --exact --nocapture
 TMPDIR=.work/tmp cargo test --bin vault macos::tests::secure_enclave_store_roundtrips_age_secret_from_private_files -- --ignored --exact --nocapture
 ```
 

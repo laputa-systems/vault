@@ -17,7 +17,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
 - Secret set/get/list/remove, passphrases, size limits and cache: Linux `tests/terminal_cli.rs` and `src/linux.rs` tests; macOS `src/macos.rs` tests, with hardware roundtrip ignored by default.
 - age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability test skips without rage 0.12.1.
-- Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Recovery end-to-end: none.
+- Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
 - macOS cache socket protocol: `src/macos.rs` identity cache tests; Linux keyring assertions can skip when unavailable.
 - Public library API and network endpoints: none; this is a CLI.
 - Performance workload: none; no benchmark or established user-visible performance gate exists.
@@ -26,7 +26,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
 - macOS stores age ciphertexts beside a Secure Enclave wrapped X25519 identity and a separate age-encrypted recovery identity.
 - Linux stores age ciphertexts under a passphrase-encrypted X25519 identity. Cache behavior and the same-UID trust boundary are in [README.md](README.md).
-- macOS reads unwrap the Secure Enclave identity. An existing-store write uses the cached identity when its public key is the recipient file, and otherwise unwraps the Secure Enclave identity. The write fails when that public key does not match the recipient. Secret values stay in the age store.
+- macOS reads and existing-store writes use the cached identity when its public key is the recipient file, and otherwise unwrap the Secure Enclave identity. The write fails when that public key does not match the recipient. Secret values stay in the age store.
 - Limit secret values to 16 MiB and never log or write plaintext secret values to disk.
 - Do not use the retired Keychain services `dev.joshuarli.vault.secure` and `dev.joshuarli.vault`.
 - In exec mode, parse `--` between environment specs and the command; only nonempty `NAME=VALUE` strings with exactly one `=` are literal.
