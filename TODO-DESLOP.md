@@ -84,6 +84,18 @@ the final 98-case selection includes both return and expression operators.
 Remaining filesystem, execution and platform dispositions, final coverage,
 uncontended test cost and the new exact-head CI gate remain open.
 
+Owner stop, 2026-11-16: the remaining native macOS filesystem selection
+contains 232 mutants (the complement of the qualified 98-case cache scope).
+The owner stopped this run after 173 completed: 102 caught, 65 missed,
+6 unviable, zero timeouts and 59 untested. This is incomplete and does not
+qualify the filesystem scope. Preserve `.work/mutants-macos-filesystem-final/`
+and `.work/tmp/macos-filesystem-qualified.log`; the bounded driver is
+`.work/tmp/run-macos-filesystem.py`. It used cargo-mutants 27.1.0, three jobs,
+six guarded cores, a 60-second test timeout and `macos::tests::` filtering.
+The unmutated baseline passed. Survivor dispositions and any test changes
+remain undone; DSLP-4 remains open. No source or test inputs changed in this
+continuation. Work is stopped; resume only at the owner's request.
+
 ## Tickets
 
 
