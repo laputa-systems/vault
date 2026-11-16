@@ -1389,7 +1389,7 @@ mod tests {
                 .unwrap()
                 .join(".work/tmp")
                 .join(format!(
-                    "vault-macos-test-{}-{}",
+                    "v-{}-{}",
                     std::process::id(),
                     NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
                 ));

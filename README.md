@@ -98,3 +98,7 @@ processes may be able to inspect.
 ## License
 
 This repository does not declare a license.
+
+Run `vault --help` for the complete command reference and examples. For commands
+that take a secret name (`set`, `isset`, `get`, and `rm`), `-h` and `--help`
+are valid names; use top-level help to avoid treating them as secret names.
