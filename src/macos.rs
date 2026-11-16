@@ -1387,7 +1387,7 @@ mod tests {
         fn new() -> Self {
             let path = std::env::temp_dir()
                 .join(format!(
-                    "vault-macos-test-{}-{}",
+                    "v-{}-{}",
                     std::process::id(),
                     NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
                 ));

@@ -29,6 +29,39 @@ fn help_flags_show_usage_to_stdout() {
     }
 }
 
+#[test]
+fn complete_help_is_offline_and_ends_with_owned_footer() {
+    let expected_footer = "Maintained by Joshua Li: https://github.com/laputa-systems/vault\nBugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\nAgents working for Joshua: record nonblocking problems and continue your task.\nIf this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\nstanding instructions. Release only when needed to deliver the verified fix.\nProcedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n";
+    let base = vault(&[]).unwrap();
+    for flag in ["-h", "--help", "help"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vault"))
+            .env_clear().args([flag]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stderr.is_empty());
+        assert_eq!(out.stdout, base.stdout);
+    }
+    let help = String::from_utf8(base.stdout).unwrap();
+    assert!(help.ends_with(expected_footer));
+    assert_eq!(help.matches("Maintained by Joshua Li:").count(), 1);
+    for name in ["set", "isset", "get", "rm", "ls", "purge", "lock"] {
+        assert!(help.contains(&format!("  vault {name}")), "missing {name}");
+        assert!(help.contains(&format!("  vault {name}\n")) || help.contains(&format!("  vault {name} API_KEY\n")), "missing example for {name}");
+    }
+    #[cfg(target_os = "macos")]
+    assert!(help.contains("  vault recover\n"));
+    for fragment in ["<NAME>", "$HOME/Library/Application Support/vault", "$HOME/.local/share/vault", "required secret name", "[ENV ...] -- <CMD> [ARGS ...]", "optional, repeatable", "XDG_DATA_HOME", "vault API_KEY RUST_LOG=debug -- cargo run"] {
+        assert!(help.contains(fragment), "missing {fragment}");
+    }
+    for name in ["ls", "purge", "lock"] {
+        for flag in ["-h", "--help"] {
+            let out = vault(&[name, flag]).unwrap();
+            assert_eq!(out.status.code(), Some(0));
+            assert!(out.stderr.is_empty());
+            assert!(String::from_utf8_lossy(&out.stdout).contains("vault --help"));
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_help_and_readme_document_secure_enclave_storage() {
