@@ -7,13 +7,25 @@ OS := $(shell uname -s)
 MUSL_LINK_FLAGS := $(if $(findstring linux-musl,$(TARGET)),-C link-arg=-fuse-ld=mold,)
 
 test:
-	cargo test
+	@bash -o pipefail -c 'cargo test -- --show-output 2>&1 | awk '\''/skipped (age interoperability|keyring assertions|key timeout query|cache scope assertions):/ { count++ } { print } END { printf "Skipped optional checks: %d\n", count }'\'''
 
 test-ci:
 	docker run --rm --init --platform "$(PLATFORM)" -e CI -v "$(CURDIR):/vault" -w /vault "$(IMAGE)" make test
 
 lint:
 	cargo clippy --all-targets --all-features -- --deny warnings
+
+coverage:
+	cargo llvm-cov --branch --html --output-dir .work/coverage
+	cargo llvm-cov report --branch --summary-only
+
+BASE ?= origin/main
+
+mutants-selftest:
+	python3 -B -m unittest discover -s scripts -p 'test_mutants_gate.py'
+
+mutants-diff: mutants-selftest
+	python3 -B scripts/mutants_gate.py "$(BASE)"
 
 install: dist
 	$(if $(filter Darwin,$(OS)),codesign --sign "$(SIGN_ID)" --force --timestamp=none target/$(TARGET)/dist/$(NAME),:)
@@ -40,4 +52,4 @@ verify-dist:
 		echo "Skipping ELF checks for $(TARGET)"; \
 	fi
 
-.PHONY: test test-ci lint install dist verify-dist
+.PHONY: test test-ci lint coverage mutants-selftest mutants-diff install dist verify-dist

@@ -1042,6 +1042,7 @@ mod tests {
         snapshot_error: bool,
         disable_error: bool,
         restore_error: bool,
+        restore_once_error: bool,
         restores: usize,
     }
 
@@ -1052,6 +1053,7 @@ mod tests {
                 snapshot_error: false,
                 disable_error: false,
                 restore_error: false,
+                restore_once_error: false,
                 restores: 0,
             }
         }
@@ -1079,7 +1081,7 @@ mod tests {
 
         fn restore(&mut self, saved: &Self::Saved) -> io::Result<()> {
             self.restores += 1;
-            if self.restore_error {
+            if std::mem::take(&mut self.restore_once_error) || self.restore_error {
                 Err(io::Error::other("restore failure"))
             } else {
                 self.echo_enabled = *saved;
@@ -1088,11 +1090,15 @@ mod tests {
         }
     }
 
-    struct FailingReader;
+    struct FailingReader(bool);
 
     impl Read for FailingReader {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("read failure"))
+            if std::mem::replace(&mut self.0, true) {
+                Ok(0)
+            } else {
+                Err(io::Error::other("read failure"))
+            }
         }
     }
 
@@ -1320,13 +1326,28 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, CliError::TerminalSettings { operation: "restore settings", .. }));
         assert!(restore_failure.restores >= 1);
+
+        let mut transient_restore_failure = FakeTerminal::ready();
+        transient_restore_failure.restore_once_error = true;
+        let error = read_without_echo(
+            &mut Cursor::new(b"secret\n"),
+            &mut Vec::new(),
+            true,
+            MAX_SECRET_BYTES,
+            &mut transient_restore_failure,
+            || None,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::TerminalSettings { operation: "restore settings", .. }));
+        assert!(transient_restore_failure.echo_enabled);
     }
 
     #[test]
     fn terminal_read_failure_restores_echo() {
         let mut terminal = FakeTerminal::ready();
         let error = read_without_echo(
-            &mut FailingReader,
+            &mut FailingReader(false),
             &mut Vec::new(),
             true,
             MAX_SECRET_BYTES,
@@ -1345,7 +1366,7 @@ mod tests {
         let mut terminal = FakeTerminal::ready();
         terminal.restore_error = true;
         let error = read_without_echo(
-            &mut FailingReader,
+            &mut FailingReader(false),
             &mut Vec::new(),
             true,
             MAX_SECRET_BYTES,
@@ -1376,13 +1397,14 @@ mod tests {
     #[test]
     fn terminal_interrupt_restores_echo() {
         let mut terminal = FakeTerminal::ready();
+        let mut signal = Some(2);
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
             true,
             MAX_SECRET_BYTES,
             &mut terminal,
-            || Some(2),
+            || signal.take(),
             || Ok(()),
         )
         .unwrap_err();

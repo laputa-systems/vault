@@ -12,13 +12,16 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
 ## Verification
 
-- `cpu-guard --cores 6 -- make test`: macOS arm64 cold 15.23s, warm 4.43s; two Secure Enclave authentication tests ignored.
-- `cpu-guard --cores 6 -- make lint`: macOS arm64 9.80s after test build.
+- Edit: `cpu-guard --cores 6 -- cargo test --bin vault <test-filter>`; cost depends on filter, unmeasured in general; check selected test count.
+- Mutation gate self-test: `cpu-guard --cores 6 -- make mutants-selftest`; requires `python3` 3.11 or newer on PATH.
+- Change: `cpu-guard --cores 6 -- make test` and `cpu-guard --cores 6 -- make lint`; macOS arm64 baseline test cold 15.23s, warm 4.43s, lint 9.80s; two hardware tests ignored.
+- Scenario: `cpu-guard --cores 6 -- make coverage` (macOS arm64 15.22s before later tests); mutation `RUST_TEST_THREADS=2 cpu-guard --cores 6 --spin 300 -- cargo mutants --baseline run --gitignore true --jobs 3 --timeout 60 --build-timeout 300 --file src/store.rs` (51 mutants, 231.22s with timeout 120 before later terminal tests).
+- Full, manual only: whole-crate mutation lists 829 mutants; 778 outside the store scope, estimated over 20 minutes. Linux musl matrix: CI `make test-ci`, cost unmeasured locally; macOS and hardware remain separate.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
 - Secret set/get/list/remove, passphrases, size limits and cache: Linux `tests/terminal_cli.rs` and `src/linux.rs` tests; macOS `src/macos.rs` tests, with hardware roundtrip ignored by default.
-- age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability test skips without rage 0.12.1.
+- age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability test skips without rage 0.12.1 and `make test` reports and counts the skip.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
-- macOS cache socket protocol: `src/macos.rs` identity cache tests; Linux keyring assertions can skip when unavailable.
+- macOS cache socket protocol: `src/macos.rs` identity cache tests; Linux keyring assertions can skip when unavailable and `make test` reports and counts the skip.
 - Public library API and network endpoints: none; this is a CLI.
 - Performance workload: none; no benchmark or established user-visible performance gate exists.
 

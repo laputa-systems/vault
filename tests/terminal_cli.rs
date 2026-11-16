@@ -5,21 +5,18 @@ mod unix_pty {
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::fd::FromRawFd;
-    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     #[cfg(target_os = "linux")]
     use std::process::Child;
-    #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicU64, Ordering};
     #[cfg(target_os = "linux")]
     use std::sync::mpsc::{self, Receiver};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    #[cfg(target_os = "linux")]
     static NEXT_DATA_HOME: AtomicU64 = AtomicU64::new(0);
 
     #[link(name = "util")]
@@ -77,10 +74,8 @@ mod unix_pty {
         Ok((master, slave))
     }
 
-    #[cfg(target_os = "linux")]
     struct TestDataHome(std::path::PathBuf);
 
-    #[cfg(target_os = "linux")]
     impl TestDataHome {
         fn new() -> io::Result<Self> {
             let path = std::env::temp_dir().join(format!(
@@ -97,7 +92,6 @@ mod unix_pty {
         }
     }
 
-    #[cfg(target_os = "linux")]
     impl Drop for TestDataHome {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -239,10 +233,10 @@ mod unix_pty {
         }
     }
 
-    fn launch_isset(slave: &File) -> io::Result<std::process::Child> {
+    fn launch_input(slave: &File, command: &str) -> io::Result<std::process::Child> {
         let executable = env!("CARGO_BIN_EXE_vault");
         Command::new(executable)
-            .args(["isset", "VAULT_TEST_TERMINAL_INPUT"])
+            .args([command, "VAULT_TEST_TERMINAL_INPUT"])
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave.try_clone()?))
@@ -332,28 +326,85 @@ mod unix_pty {
 
     #[test]
     fn silent_terminal_input_hides_bytes_and_restores_settings_on_invalid_utf8() {
+        for (command, expect_prompt) in [("isset", false), ("set", true)] {
+            let (mut master, slave) = open_pty().unwrap();
+            let before = tcgetattr(&slave).unwrap();
+            let output_reader = thread::spawn({
+                let reader = master.try_clone().unwrap();
+                move || read_terminal_output(reader)
+            });
+            let mut child = launch_input(&slave, command).unwrap();
+            drop(slave);
+            wait_for_hidden_echo(&master).unwrap();
+            master.write_all(b"\x7fvault-terminal-secret-\x7f\xff\n").unwrap();
+            let status = child.wait().unwrap();
+            assert!(!status.success(), "unexpected success: {status}");
+            let after = tcgetattr(&master).unwrap();
+            let output = output_reader.join().unwrap().unwrap();
+            assert_eq!(
+                before.local_modes & !LocalModes::PENDIN,
+                after.local_modes & !LocalModes::PENDIN
+            );
+            assert!(!output
+                .windows(b"vault-terminal-secret".len())
+                .any(|window| window == b"vault-terminal-secret"));
+            assert!(String::from_utf8_lossy(&output).contains("invalid UTF-8"));
+            assert_eq!(output.windows(3).filter(|window| *window == b"\x08 \x08").count(), usize::from(expect_prompt), "{command}");
+            assert_eq!(
+                String::from_utf8_lossy(&output).contains("Enter value for VAULT_TEST_TERMINAL_INPUT:"),
+                expect_prompt,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn completed_terminal_input_reaches_store_validation_without_suspending() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if matches!(self.0.try_wait(), Ok(None)) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        let data_home = TestDataHome::new().unwrap();
+        std::fs::set_permissions(data_home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(data_home.path().join("vault"), b"not a directory").unwrap();
         let (mut master, slave) = open_pty().unwrap();
-        let before = tcgetattr(&slave).unwrap();
         let output_reader = thread::spawn({
             let reader = master.try_clone().unwrap();
             move || read_terminal_output(reader)
         });
-        let mut child = launch_isset(&slave).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+        command.args(["isset", "VAULT_TEST_TERMINAL_INPUT"])
+            .env("XDG_DATA_HOME", data_home.path())
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave.try_clone().unwrap()))
+            .process_group(0);
+        unsafe {
+            command.pre_exec(|| {
+                if signal(SIGTSTP, 0) == usize::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = ChildGuard(command.spawn().unwrap());
+        drop(command);
         drop(slave);
         wait_for_hidden_echo(&master).unwrap();
-        master.write_all(b"vault-terminal-secret-\xff\n").unwrap();
-        let status = child.wait().unwrap();
-        assert!(!status.success(), "unexpected success: {status}");
-        let after = tcgetattr(&master).unwrap();
+        master.write_all(b"value\n").unwrap();
+        let event = wait_for_child_event(child.0.id() as c_int).unwrap();
+        if event.is_none() || event.is_some_and(is_stopped) {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+        }
         let output = output_reader.join().unwrap().unwrap();
-        assert_eq!(
-            before.local_modes & !LocalModes::PENDIN,
-            after.local_modes & !LocalModes::PENDIN
-        );
-        assert!(!output
-            .windows(b"vault-terminal-secret".len())
-            .any(|window| window == b"vault-terminal-secret"));
-        assert!(String::from_utf8_lossy(&output).contains("invalid UTF-8"));
+        assert!(event.is_some_and(|status| !is_stopped(status)), "child stopped or timed out: {event:?}");
+        assert!(String::from_utf8_lossy(&output).contains("store path is not a directory"));
     }
 
     #[test]
@@ -364,7 +415,7 @@ mod unix_pty {
             let reader = master.try_clone().unwrap();
             move || read_terminal_output(reader)
         });
-        let mut child = launch_isset(&slave).unwrap();
+        let mut child = launch_input(&slave, "isset").unwrap();
         drop(slave);
         wait_for_hidden_echo(&master).unwrap();
         let result = unsafe { kill(child.id() as c_int, 2) };
@@ -405,6 +456,12 @@ mod unix_pty {
         assert_eq!(unsafe { kill(child.id() as c_int, SIGTSTP) }, 0);
 
         let event = wait_for_child_event(child.id() as c_int).unwrap();
+        if event.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = output_reader.join();
+            panic!("terminal input did not suspend");
+        }
         let stopped = event.is_some_and(is_stopped);
         let stopped_settings = tcgetattr(&master).ok();
         let (final_status, resumed, resumed_in_silent_mode) =

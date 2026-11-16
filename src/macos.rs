@@ -1385,9 +1385,7 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let path = std::env::current_dir()
-                .unwrap()
-                .join(".work/tmp")
+            let path = std::env::temp_dir()
                 .join(format!(
                     "vault-macos-test-{}-{}",
                     std::process::id(),
@@ -1512,6 +1510,47 @@ mod tests {
     }
 
     #[test]
+    fn recovery_ciphertext_file_enforces_its_size_boundary() {
+        let test_dir = TestDir::new();
+        let data = open_data_home(test_dir.path(), false).unwrap().unwrap();
+        let file = fs::File::create(test_dir.path().join("identity.age")).unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        assert!(validate_recovery_identity(&data).unwrap_err().contains("malformed"));
+        file.set_len(1024 * 1024 + 1).unwrap();
+        assert!(validate_recovery_identity(&data).unwrap_err().contains("exceeds the maximum file size"));
+    }
+
+    #[test]
+    fn identity_binding_contains_the_recipient_and_domain() {
+        let recipient = age::x25519::Identity::generate().to_public();
+        let mut expected = b"dev.joshuarli.vault\0age-x25519\0".to_vec();
+        expected.extend_from_slice(recipient.to_string().as_bytes());
+        assert_eq!(super::identity_binding(&recipient), expected);
+    }
+
+    #[test]
+    fn secret_size_is_checked_before_store_access() {
+        let test_dir = TestDir::new();
+        fs::write(test_dir.path().join(STORE_NAME), b"not a directory").unwrap();
+        let mut value = vec![0u8; 16 * 1024 * 1024];
+        let exact = set_secret_at(test_dir.path(), "TOKEN", &value, |_| panic!("unexpected prompt")).unwrap_err();
+        assert_eq!(exact, "vault: macOS store path is not a directory");
+        value.push(0);
+        let over = set_secret_at(test_dir.path(), "TOKEN", &value, |_| panic!("unexpected prompt")).unwrap_err();
+        assert_eq!(over, "vault: TOKEN: secret exceeds the 16 MiB limit");
+    }
+
+    #[test]
+    fn new_store_rejects_mismatched_recovery_passphrases_before_hardware() {
+        let test_dir = TestDir::new();
+        let mut values = ["first", "second"].into_iter();
+        let error = set_secret_at(test_dir.path(), "TOKEN", b"\xff", |_| {
+            Ok(SecretString::from(values.next().unwrap().to_owned()))
+        }).unwrap_err();
+        assert_eq!(error, "vault: recovery passphrases do not match");
+    }
+
+    #[test]
     fn set_refuses_to_write_when_recovery_identity_is_missing_or_malformed() {
         for recovery_identity in [None, Some(&b"invalid"[..])] {
             let test_dir = TestDir::new();
@@ -1588,12 +1627,21 @@ mod tests {
         let write = set_secret_at(test_dir.path(), "TOKEN", b"from-cache", |_| {
             panic!("a warm matching cache does not ask for the recovery passphrase")
         });
-        let _ = clear_identity_cache_at(&socket);
         write.unwrap();
-
-        let ciphertext = fs::read(secrets.join(secret_filename("TOKEN").unwrap())).unwrap();
+        let data = open_data_home(test_dir.path(), false).unwrap().unwrap();
+        let opened_store = open_store(&data).unwrap().unwrap();
+        let ciphertext_path = secrets.join(secret_filename("TOKEN").unwrap());
+        let ciphertext = fs::read(&ciphertext_path).unwrap();
         let restored = age::x25519::Identity::from_str(&private_key_text).unwrap();
         assert_eq!(age::decrypt(&restored, &ciphertext).unwrap(), b"from-cache");
+        let file = fs::OpenOptions::new().write(true).open(&ciphertext_path).unwrap();
+        file.set_len(17 * 1024 * 1024).unwrap();
+        let at_limit = read_age_values(&opened_store, &["TOKEN"], Some(&socket), &mut |_| Ok(())).err().unwrap();
+        file.set_len(17 * 1024 * 1024 + 1).unwrap();
+        let over_limit = read_age_values(&opened_store, &["TOKEN"], Some(&socket), &mut |_| Ok(())).err().unwrap();
+        let _ = clear_identity_cache_at(&socket);
+        assert!(at_limit.contains("encrypted secret is damaged"), "{at_limit}");
+        assert!(over_limit.contains("exceeds the maximum file size"), "{over_limit}");
     }
 
     #[test]
@@ -1657,6 +1705,10 @@ mod tests {
         let other = age::x25519::Identity::generate().to_public();
         assert!(fetch_cached_identity(&socket, &other).unwrap().is_none());
 
+        let forwarded = age::x25519::Identity::generate();
+        let forwarded_recipient = forwarded.to_public();
+        serve_cache(&socket, forwarded_recipient.to_string(), forwarded, std::time::Duration::from_millis(500)).unwrap();
+        assert!(fetch_cached_identity(&socket, &forwarded_recipient).unwrap().is_some());
         let replacement = age::x25519::Identity::generate();
         let replacement_recipient = replacement.to_public();
         store_cached_identity(&socket, &replacement_recipient, &replacement).unwrap();
@@ -1721,8 +1773,90 @@ mod tests {
     }
 
     #[test]
+    fn invalid_cache_reply_reports_warning_and_falls_back() {
+        use std::io::{Read, Write};
+        let test_dir = TestDir::new();
+        let socket = test_dir.path().join("cache.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                        let mut request = [0; 128];
+                        assert_ne!(stream.read(&mut request).unwrap(), 0);
+                        stream.write_all(b"invalid\n").unwrap();
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => return false,
+                }
+            }
+        });
+        let recipient = age::x25519::Identity::generate().to_public();
+        let mut warnings = Vec::new();
+        let result = super::try_cached_identity(Some(&socket), &recipient, &mut |warning| {
+            warnings.push(warning.to_owned());
+            Ok(())
+        });
+        let served = server.join().unwrap();
+        assert!(served);
+        assert!(result.is_none());
+        assert_eq!(warnings, ["macOS identity cache unavailable: vault: identity cache returned an invalid reply"]);
+    }
+
+    #[test]
+    fn inaccessible_cache_socket_reports_connection_and_bind_errors() {
+        let test_dir = TestDir::new();
+        let directory = test_dir.path().join("locked");
+        fs::create_dir(&directory).unwrap();
+        let socket = directory.join("cache.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o0)).unwrap();
+        let connection = super::connect_cache(&socket).err();
+        let identity = age::x25519::Identity::generate();
+        let bind = super::bind_cache_listener(&socket, &identity.to_public().to_string(), &identity).err();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE)).unwrap();
+        drop(listener);
+        assert!(connection.unwrap().contains("connect identity cache failed"));
+        assert!(bind.unwrap().contains("bind identity cache socket failed"));
+        assert!(socket.exists());
+    }
+
+    #[test]
+    fn cache_streams_have_io_deadlines() {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        super::set_cache_timeouts(&stream).unwrap();
+        assert_eq!(stream.read_timeout().unwrap(), Some(std::time::Duration::from_secs(5)));
+        assert_eq!(stream.write_timeout().unwrap(), Some(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn cache_reply_enforces_the_line_size_boundary() {
+        use std::io::Write;
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(&vec![b'a'; 2048]).unwrap();
+        writer.write_all(b"\n").unwrap();
+        drop(writer);
+        assert_eq!(super::read_cache_line(&mut reader).unwrap().len(), 2048);
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(&vec![b'a'; 2049]).unwrap();
+        drop(writer);
+        assert_eq!(super::read_cache_line(&mut reader).unwrap_err(), "vault: identity cache line exceeds the maximum size");
+    }
+
+    #[test]
     fn cache_socket_path_rejects_overlong_store_paths() {
         assert!(cache_socket_path(std::path::Path::new("/tmp")).is_some());
+        let exact = PathBuf::from("/").join("x".repeat(85));
+        assert_eq!(cache_socket_path(&exact).unwrap().as_os_str().len(), 103);
+        let over = PathBuf::from("/").join("x".repeat(86));
+        assert!(cache_socket_path(&over).is_none());
         let long = PathBuf::from("/tmp").join("x".repeat(200));
         assert!(cache_socket_path(&long).is_none());
     }

@@ -1,5 +1,5 @@
 Prefix: DSLP
-Next: 8
+Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
@@ -22,6 +22,10 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 | expect_used | 6 / 6 | 0 | 1 / 1 | 5 / 5 | Reject: too many false positives |
 | redundant_clone | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
 | needless_pass_by_value | 4 / 3 | 0 | 0 | 4 / 3 | Reject: ownership and callbacks |
+
+Tests (in progress): macOS arm64, base `47dfb47ec6a1f9de2ad2d0619d5fead9bc6d8d2d`; line/branch coverage before 1596/2639 and 192/422, intermediate 1627/2665 and 199/422. Store mutation (51 listed): before 18 caught, 27 missed, 6 unviable in 102.66s; intermediate 37 caught, 8 platform-unrun, 6 unviable in 231.22s. No exclusions. The 8 are Linux-only `validate_name`; the six shared-code survivors were caught by size-boundary tests. Exec/terminal selection (61): before 39 caught, 9 missed, 6 unviable, 7 timeouts in 434.97s; after 50 caught, 2 missed, 6 unviable, 3 unconfirmed timeouts in 392.13s. Timeout confirmation, macOS cache scope, final store mutation and final coverage remain pending. Two warm tests passed under host contention in 14.64s and 15.55s; their timing is not an uncontended comparison. DSLP-8 records the stale-socket race. DSLP-4 remains open.
+
+Tests continuation: the three remaining exec/terminal timeouts were confirmed at 180s; the two misses are signal-handler error/cleanup paths without a host witness. The macOS selection had 81 mutants before changes (39 caught, 24 missed, 18 unviable in 370.50s); after focused tests and two equivalent age ciphertext-size exclusions, 79 ran (56 caught, 5 missed, 18 unviable in 390.27s). Four misses require the ignored Secure Enclave cold-cache path; a fifth accept-error path was then covered by a descriptor-limited daemon test. The final macOS rerun and its one retry both failed their unmutated baseline because that test's daemon exited before binding; the retry reported SIGABRT without stderr. The cause is unestablished and final mutation and coverage evidence is incomplete. A later store run had a false catch from a nonblocking mock-server read; that fixture was corrected, but the run cannot establish a final count. The other 636 originally listed mutants remain outside the selected scopes. DSLP-4 stays open.
 
 ## Tickets
 
@@ -47,13 +51,23 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 - **Effort:** M
 
 
-### DSLP-6 · P2 · Interoperability and keyring tests pass silently when their tool is missing
+### DSLP-6 · P2 · Interoperability and keyring checks can be skipped in CI
 
 - **Area:** Tests · CI
 - **Where:** tests/terminal_cli.rs:718, src/linux.rs:1353
-- **Problem:** The Linux interoperability test returns early (passes) when rage 0.12.1 is not installed, and the keyring assertions skip when no keyring is available, so CI can report green without exercising either boundary. CI has no macOS lane, and the two hardware authentication tests are #[ignore].
-- **Recommendation:** Install a pinned rage 0.12.1 in the CI image and make the test fail rather than return when CI=true and it is missing; do the same for the keyring path, or record it as an owner-run boundary in Verification.
+- **Problem:** The Linux rage and keyring checks can return early without exercising their boundaries. make test now displays and counts these skips, but CI can still pass without the checks; the cargo, mirror and OCI catalogs did not list rage 0.12.1 on 2026-11-15. CI has no macOS lane and hardware authentication tests remain ignored.
+- **Recommendation:** Provision pinned rage 0.12.1 from an approved source and make the interoperability check required in CI; provide a usable kernel keyring or document an owner-run check. Keep skipped checks visible until they can run.
 - **Fix with:** test-audit
+- **Effort:** S
+
+
+### DSLP-8 · P2 · Stale socket test races with concurrent process creation
+
+- **Area:** Tests · macOS
+- **Where:** src/macos.rs:1706, src/macos.rs:475
+- **Problem:** A warm parallel make test failed with identity cache connection closed early in stale_cache_socket_is_removed_without_prompting. Ten isolated runs each on base and candidate passed. A controlled fork overlap on the base test reproduced the same error: a child retained the listening descriptor after the parent dropped it, so connect succeeded before the child closed it. The exact interleaving in the original failure was not observed.
+- **Recommendation:** Create the stale socket in an isolated child process and wait for it to exit before testing, or otherwise prevent a concurrent fork from retaining the listener; preserve the stale-socket removal assertion and verify it under concurrent process creation.
+- **Fix with:** root-cause
 - **Effort:** S
 
 

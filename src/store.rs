@@ -156,7 +156,7 @@ pub(crate) fn validate_name(name: &str) -> Result<(), String> {
 mod tests {
     use super::{
         decrypt_identity, decrypt_secret, encrypt_identity, encrypt_secret,
-        validate_encrypted_identity, validate_identity_recipient,
+        parse_recipient, validate_encrypted_identity, validate_identity_recipient,
     };
     use age::secrecy::{ExposeSecret, SecretString};
 
@@ -199,5 +199,43 @@ mod tests {
         let last = ciphertext.len() - 1;
         ciphertext[last] ^= 1;
         assert!(decrypt_secret(&identity, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn recipient_and_identity_validation_rejects_mismatches_and_bad_lines() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let other = age::x25519::Identity::generate().to_public();
+        assert!(validate_identity_recipient(&identity, &recipient).is_ok());
+        assert!(validate_identity_recipient(&identity, &other).is_err());
+        let address = recipient.to_string();
+        assert!(parse_recipient(address.as_bytes()).is_ok());
+        for invalid in ["", "\n\n", "\r"] {
+            assert_eq!(parse_recipient(invalid.as_bytes()).unwrap_err(), "vault: public recipient is malformed");
+        }
+        assert_eq!(parse_recipient(address.to_uppercase().as_bytes()).unwrap_err(), "vault: public recipient is not in canonical form");
+        let passphrase = || SecretString::from("disposable test passphrase".to_owned());
+        let encrypted = encrypt_identity(b"invalid\ridentity", passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity has an invalid format");
+        let encrypted = encrypt_identity(b"invalid\nidentity", passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity has an invalid format");
+    }
+
+    #[test]
+    fn decrypted_values_enforce_size_limits() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let limit = 16 * 1024 * 1024;
+        let exact = vec![b'a'; limit];
+        let encrypted = encrypt_secret(&recipient, &exact).unwrap();
+        assert_eq!(decrypt_secret(&identity, &encrypted).unwrap().len(), limit);
+        let oversized = vec![b'a'; limit + 1];
+        let encrypted = encrypt_secret(&recipient, &oversized).unwrap();
+        assert_eq!(decrypt_secret(&identity, &encrypted).unwrap_err(), "decrypted secret exceeds the size limit");
+        let passphrase = || SecretString::from("disposable test passphrase".to_owned());
+        let encrypted = encrypt_identity(&vec![b'a'; 1024], passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity is not a valid age X25519 identity");
+        let encrypted = encrypt_identity(&vec![b'a'; 1025], passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity exceeds the maximum size");
     }
 }
