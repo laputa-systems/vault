@@ -174,8 +174,18 @@ fn cache_daemon_reports_accept_failure() {
     use std::io::Read;
     use std::os::unix::net::UnixStream;
 
-    let mut command = Command::new("/bin/sh");
-    command.args(["-c", "ulimit -n 4; exec \"$1\" __cache-daemon", "sh", env!("CARGO_BIN_EXE_vault")]);
+    let library_home = CacheHome(std::env::temp_dir().join(format!("vault-accept-interpose-{}", std::process::id())));
+    std::fs::create_dir(&library_home.0).unwrap();
+    let library = library_home.0.join("accept-error.dylib");
+    let status = Command::new("cc")
+        .args(["-dynamiclib", "-o"])
+        .arg(&library)
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/accept_error.c"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "VAULT_HARNESS_ERROR: compile the accept refusal fixture");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+    command.arg("__cache-daemon").env("DYLD_INSERT_LIBRARIES", &library);
     let mut fixture = CacheDaemonFixture::start(command, "limit");
     let socket = fixture.wait_for_socket();
     let _stream = UnixStream::connect(socket).unwrap();

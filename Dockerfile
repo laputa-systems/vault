@@ -154,3 +154,6 @@ exec cargo "$@"
 EOF
 
 WORKDIR /vault
+
+COPY scripts/install-rage.sh /vault/scripts/install-rage.sh
+RUN sh scripts/install-rage.sh /usr/local/bin

@@ -27,6 +27,23 @@ Tests (in progress): macOS arm64, base `47dfb47ec6a1f9de2ad2d0619d5fead9bc6d8d2d
 
 Tests continuation: the three remaining exec/terminal timeouts were confirmed at 180s; the two misses are signal-handler error/cleanup paths without a host witness. The macOS selection had 81 mutants before changes (39 caught, 24 missed, 18 unviable in 370.50s); after focused tests and two equivalent age ciphertext-size exclusions, 79 ran (56 caught, 5 missed, 18 unviable in 390.27s). Four misses require the ignored Secure Enclave cold-cache path; a fifth accept-error path was then covered by a descriptor-limited daemon test. The final macOS rerun and its one retry both failed their unmutated baseline because that test's daemon exited before binding; the retry reported SIGABRT without stderr. The cause is unestablished and final mutation and coverage evidence is incomplete. A later store run had a false catch from a nonblocking mock-server read; that fixture was corrected, but the run cannot establish a final count. The other 636 originally listed mutants remain outside the selected scopes. DSLP-4 stays open.
 
+Harness continuation: the accept-failure scenario now interposes only a ready
+listener's `accept`, returning EMFILE without starving daemon startup of file
+descriptors. It passes normally and fails when the daemon swallows the accept
+error. The earlier SIGABRT's cause remains unclaimed. The stale-socket fixture
+creates and closes its listener in an executed child, then waits for exit, so
+concurrent forks of the test process cannot retain that listener. Native macOS
+`make test lint mutants-selftest` passes, with two hardware tests ignored.
+
+Linux ARM64 musl `make test lint` passes in the repository Docker image. Its
+rage interoperability scenario executes with the checksum-pinned owned rage
+0.12.1 release `0323ec863466ce8d242b27670ea6707d33f7d60c`. A missing-tool
+negative control under CI fails with the required-version assertion. The two
+keyring checks visibly skip because the container denies keyring syscalls;
+`tests/security_linux/README.md` defines the required separate host check.
+CI now includes native macOS and retains mutation artifacts; final store gate,
+coverage and uncontended test-cost qualification remain pending.
+
 ## Tickets
 
 

@@ -82,6 +82,11 @@ def read_results(path, selected):
                 continue
             name = scenario['Mutant']['name']
             summary = summaries[outcome['summary']]
+            log = Path(outcome['log_path'])
+            if log.is_absolute() or '..' in log.parts:
+                raise ValueError('invalid log path')
+            if 'VAULT_HARNESS_ERROR:' in (path.parent / log).read_text():
+                raise ValueError(f'harness error invalidates mutant: {name}')
             if name in results:
                 raise ValueError('duplicate mutant')
             results[name] = summary

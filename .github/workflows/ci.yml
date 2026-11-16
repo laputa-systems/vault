@@ -21,6 +21,7 @@ jobs:
   mutants:
     name: mutants
     runs-on: ubuntu-26.04-arm
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -31,11 +32,37 @@ jobs:
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-mutants@27.1.0
+      - name: Install pinned age interoperability tool
+        run: |
+          sh scripts/install-rage.sh "$PWD/.work/tools/bin"
+          echo "$PWD/.work/tools/bin" >> "$GITHUB_PATH"
       - name: mutants
         env:
           BASE_REF: ${{ github.base_ref }}
           RUST_TEST_THREADS: 2
         run: make mutants-diff BASE="origin/$BASE_REF"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutation-evidence
+          path: .work/mutants-gate/
+          include-hidden-files: true
+
+  macos:
+    name: Test (macOS)
+    runs-on: xcode-27
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test and lint
+        run: |
+          mkdir -p .work/tmp
+          export TMPDIR="$PWD/.work/tmp"
+          make test lint mutants-selftest
 
   linux-musl:
     name: Test (Linux ${{ matrix.arch }} musl)
@@ -91,7 +118,8 @@ jobs:
 
   ci:
     name: CI
-    needs: linux-musl
+    needs: [linux-musl, macos, mutants]
+    if: always()
     runs-on: ubuntu-26.04-arm
     permissions:
       contents: read
@@ -100,4 +128,12 @@ jobs:
       run:
         shell: bash -euo pipefail {0}
     steps:
-      - run: echo "Linux musl matrix passed"
+      - name: Require every verification lane
+        env:
+          LINUX_RESULT: ${{ needs.linux-musl.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          MUTANTS_RESULT: ${{ needs.mutants.result }}
+        run: |
+          test "$LINUX_RESULT" = success
+          test "$MACOS_RESULT" = success
+          test "$MUTANTS_RESULT" = success

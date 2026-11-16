@@ -19,9 +19,9 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - Full, manual only: whole-crate mutation lists 829 mutants; 778 outside the store scope, estimated over 20 minutes. Linux musl matrix: CI `make test-ci`, cost unmeasured locally; macOS and hardware remain separate.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
 - Secret set/get/list/remove, passphrases, size limits and cache: Linux `tests/terminal_cli.rs` and `src/linux.rs` tests; macOS `src/macos.rs` tests, with hardware roundtrip ignored by default.
-- age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability test skips without rage 0.12.1 and `make test` reports and counts the skip.
+- age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; CI requires rage 0.12.1 from the checksum-pinned owned release, installed by `scripts/install-rage.sh`; developer skips remain visible.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
-- macOS cache socket protocol: `src/macos.rs` identity cache tests; Linux keyring assertions can skip when unavailable and `make test` reports and counts the skip.
+- macOS cache socket protocol: `src/macos.rs` identity cache tests and accept-refusal interposition; Linux keyring assertions can skip when unavailable and `make test` reports and counts the skip. Required host checks: `tests/security_linux/README.md`.
 - Public library API and network endpoints: none; this is a CLI.
 - Performance workload: none; no benchmark or established user-visible performance gate exists.
 

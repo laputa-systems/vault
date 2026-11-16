@@ -62,10 +62,23 @@ class ResultsTests(unittest.TestCase):
     def write(self, summary='CaughtMutant', count=1):
         kinds = {'CaughtMutant': 'caught', 'MissedMutant': 'missed', 'Timeout': 'timeout', 'Unviable': 'unviable'}
         data = {'outcomes': [{'scenario': 'Baseline', 'summary': 'Success'},
-                {'scenario': {'Mutant': {'name': 'mutant'}}, 'summary': summary}],
+                {'scenario': {'Mutant': {'name': 'mutant'}}, 'summary': summary, 'log_path': 'mutant.log'}],
                 'total_mutants': count, 'caught': 0, 'missed': 0, 'timeout': 0, 'unviable': 0}
         data[kinds[summary]] = 1
         self.path.write_text(json.dumps(data))
+        (self.path.parent / 'mutant.log').write_text('product assertion failed')
+
+    def test_infrastructure_failure_is_not_a_catch(self):
+        self.write()
+        (self.path.parent / 'mutant.log').write_text('VAULT_HARNESS_ERROR: accept fixture compilation failed')
+        with self.assertRaisesRegex(GateError, 'harness error invalidates mutant'):
+            read_results(self.path, ['mutant'])
+
+    def test_missing_log_is_not_a_catch(self):
+        self.write()
+        (self.path.parent / 'mutant.log').unlink()
+        with self.assertRaisesRegex(GateError, 'incomplete'):
+            read_results(self.path, ['mutant'])
 
     def test_missing_and_malformed(self):
         with self.assertRaisesRegex(GateError, 'incomplete'):

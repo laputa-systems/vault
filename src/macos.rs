@@ -1762,8 +1762,12 @@ mod tests {
         let test_dir = TestDir::new();
         let socket = test_dir.path().join("cache.sock");
         let recipient = age::x25519::Identity::generate().to_public();
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        drop(listener);
+        let status = std::process::Command::new("python3")
+            .args(["-c", "import socket,sys; listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); listener.bind(sys.argv[1]); listener.listen(); listener.close()"])
+            .arg(&socket)
+            .status()
+            .expect("python3 creates the isolated stale socket");
+        assert!(status.success());
         assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_none());
         assert!(!socket.exists());
         assert!(matches!(

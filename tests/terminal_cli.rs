@@ -778,6 +778,7 @@ mod unix_pty {
             None => match Command::new("rage").arg("--version").output() {
                 Ok(output) if output.status.success() => std::path::PathBuf::from("rage"),
                 _ => {
+                    assert!(std::env::var_os("CI").is_none(), "CI requires pinned rage 0.12.1 for age interoperability");
                     eprintln!("skipped age interoperability: rage 0.12.1 is unavailable");
                     return;
                 }
@@ -785,6 +786,7 @@ mod unix_pty {
         };
         let version = Command::new(&rage).arg("--version").output().unwrap();
         if !version.status.success() || !String::from_utf8_lossy(&version.stdout).contains("0.12.1") {
+            assert!(std::env::var_os("CI").is_none(), "CI requires pinned rage 0.12.1 for age interoperability");
             eprintln!("skipped age interoperability: rage 0.12.1 is required");
             return;
         }
