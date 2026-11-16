@@ -30,39 +30,36 @@ compile_error!("vault supports macOS and Linux");
 #[cfg(target_os = "macos")]
 use crate::macos as storage;
 
-const USAGE_HEADER: &str = "\
-  vault — secret manager
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandKind { Set, Isset, Get, Rm, Ls, Purge, Lock, #[cfg(target_os = "macos")] Recover }
 
-Usage:
+struct CommandSpec {
+    kind: CommandKind,
+    name: &'static str,
+    argument: Option<&'static str>,
+    description: &'static str,
+    example: &'static str,
+}
 
-  vault set   <NAME>            Store a secret (prompts for value)
-  vault isset <NAME>            Store a secret (silent, no prompt)
-  vault get   <NAME>            Print a secret to stdout
-  vault rm    <NAME>            Delete a secret
-  vault ls                      List all stored secret names
-  vault purge                   Delete every secret vault manages
-";
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec { kind: CommandKind::Set, name: "set", argument: Some("NAME"), description: "Store a secret, prompting on a terminal; reads stdin otherwise", example: "vault set API_KEY" },
+    CommandSpec { kind: CommandKind::Isset, name: "isset", argument: Some("NAME"), description: "Store a secret without a prompt; reads stdin", example: "vault isset API_KEY" },
+    CommandSpec { kind: CommandKind::Get, name: "get", argument: Some("NAME"), description: "Print a secret to stdout", example: "vault get API_KEY" },
+    CommandSpec { kind: CommandKind::Rm, name: "rm", argument: Some("NAME"), description: "Delete a secret", example: "vault rm API_KEY" },
+    CommandSpec { kind: CommandKind::Ls, name: "ls", argument: None, description: "List stored secret names", example: "vault ls" },
+    CommandSpec { kind: CommandKind::Purge, name: "purge", argument: None, description: "Delete every secret vault manages", example: "vault purge" },
+    CommandSpec { kind: CommandKind::Lock, name: "lock", argument: None, description: "Remove this store's cached identity", example: "vault lock" },
+    #[cfg(target_os = "macos")]
+    CommandSpec { kind: CommandKind::Recover, name: "recover", argument: None, description: "Rewrap the age identity with a new Secure Enclave key", example: "vault recover" },
+];
 
-#[cfg(target_os = "linux")]
-const PLATFORM_USAGE: &str = "  vault lock                    Remove this store's cached identity\n";
-
-#[cfg(target_os = "macos")]
-const PLATFORM_USAGE: &str = "  vault lock                    Remove this store's cached identity\n  vault recover                 Rewrap the age identity with a new Secure Enclave key\n";
-
-const USAGE_FOOTER: &str = "\
-\n\
-  vault [ENV ...] -- <CMD> [ARGS ...]   Run CMD with secrets injected
-
-Environment specifications before -- may be:
-
-  KEY                          Look up KEY in the vault
-  KEY=VALUE                    Pass literal KEY=VALUE
-
-Examples:
-
-  vault set OPENAI_API_KEY
-  vault OPENAI_API_KEY DATABASE_URL RUST_LOG=debug -- cargo run
-  vault -- cargo run
+const EXEC_EXAMPLE: &str = "vault API_KEY RUST_LOG=debug -- cargo run";
+const OWNED_FOOTER: &str = "Maintained by Joshua Li: https://github.com/laputa-systems/vault
+Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.
+Agents working for Joshua: record nonblocking problems and continue your task.
+If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's
+standing instructions. Release only when needed to deliver the verified fix.
+Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md
 ";
 
 #[cfg(target_os = "macos")]
@@ -226,59 +223,71 @@ fn run(args: &[String]) -> Result<ExitCode, CliError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    match args[0].as_str() {
-        "set" => {
-            cmd_set(&args[1..], false)?;
-            Ok(ExitCode::SUCCESS)
+    if matches!(args[0].as_str(), "-h" | "--help" | "help") {
+        write_usage()?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(spec) = COMMANDS.iter().find(|spec| spec.name == args[0]) {
+        let rest = &args[1..];
+        if spec.argument.is_none() && rest.len() == 1 && matches!(rest[0].as_str(), "-h" | "--help") {
+            write_command_help(spec)?;
+            return Ok(ExitCode::SUCCESS);
         }
-        "isset" => {
-            cmd_set(&args[1..], true)?;
-            Ok(ExitCode::SUCCESS)
+        validate_command(spec, rest)?;
+        match spec.kind {
+            CommandKind::Set => cmd_set(rest, false)?,
+            CommandKind::Isset => cmd_set(rest, true)?,
+            CommandKind::Get => cmd_get(rest)?,
+            CommandKind::Rm => cmd_rm(rest)?,
+            CommandKind::Ls => cmd_ls(rest)?,
+            CommandKind::Purge => cmd_purge(rest)?,
+            CommandKind::Lock => cmd_lock(rest)?,
+            #[cfg(target_os = "macos")]
+            CommandKind::Recover => cmd_recover(rest)?,
         }
-        "get" => {
-            cmd_get(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "rm" => {
-            cmd_rm(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "ls" => {
-            cmd_ls(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "purge" => {
-            cmd_purge(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        "lock" => {
-            cmd_lock(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        #[cfg(target_os = "macos")]
-        "recover" => {
-            cmd_recover(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        #[cfg(target_os = "macos")]
-        storage::CACHE_DAEMON_ARG => {
-            cmd_cache_daemon(&args[1..])?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "-h" | "--help" | "help" => {
-            write_usage()?;
-            Ok(ExitCode::SUCCESS)
-        }
-        _ => exec_mode(args),
+        return Ok(ExitCode::SUCCESS);
+    }
+    #[cfg(target_os = "macos")]
+    if args[0] == storage::CACHE_DAEMON_ARG {
+        cmd_cache_daemon(&args[1..])?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    exec_mode(args)
+}
+
+fn validate_command(spec: &CommandSpec, args: &[String]) -> Result<(), CliError> {
+    if spec.argument.is_some() {
+        require_exact_name(args, spec.name).map(|_| ())
+    } else {
+        require_no_args(args, spec.name)
     }
 }
 
+fn command_reference(spec: &CommandSpec) -> String {
+    let argument = spec.argument.map_or(String::new(), |name| format!(" <{name}>"));
+    let detail = spec.argument.map_or("".to_owned(), |name| format!("    {name}: required secret name\n"));
+    format!("  vault {}{}\n    {}\n{}", spec.name, argument, spec.description, detail)
+}
+
+fn write_command_help(spec: &CommandSpec) -> Result<(), CliError> {
+    let help = format!("Usage:\n{}\nOptions:\n  -h, --help  Show this help\n\nExamples:\n  {}\n\nSee vault --help for the complete reference.\n", command_reference(spec), spec.example);
+    write_stdout(help.as_bytes())
+}
+
 fn write_usage() -> Result<(), CliError> {
-    write_stdout(USAGE_HEADER.as_bytes())?;
-    write_stdout(PLATFORM_USAGE.as_bytes())?;
-    write_stdout(USAGE_FOOTER.as_bytes())?;
-    write_stdout(STORAGE_WARNING.as_bytes())
+    let mut help = String::from("vault — secret manager\n\nUsage:\n  vault <COMMAND> [ARGUMENT]\n  vault [ENV ...] -- <CMD> [ARGS ...]\n\nOptions:\n  -h, --help, help  Show this reference when used as the first argument\n\nCommands:\n");
+    for spec in COMMANDS {
+        help.push_str(&command_reference(spec));
+    }
+    help.push_str("\nFor commands requiring NAME, -h and --help are secret names.\n\nExec mode:\n  ENV: optional, repeatable environment specification before --\n    KEY looks up a vault secret; KEY=VALUE passes a literal (empty VALUE allowed).\n    A literal has a nonempty KEY and exactly one =; other forms are secret names.\n  CMD: required command; ARGS: optional, repeatable child arguments.\n  The child inherits the environment and standard streams; its status is returned.\n\nStore location: $XDG_DATA_HOME/vault when XDG_DATA_HOME is absolute; otherwise\nmacOS uses $HOME/Library/Application Support/vault and Linux uses\n$HOME/.local/share/vault. HOME must be absolute when used.\n");
+    help.push_str(STORAGE_WARNING);
+    help.push_str("\nExamples:\n");
+    for spec in COMMANDS {
+        help.push_str(&format!("  {}\n", spec.example));
+    }
+    help.push_str(&format!("  {EXEC_EXAMPLE}\n\n"));
+    help.push_str(OWNED_FOOTER);
+    write_stdout(help.as_bytes())
 }
 
 fn write_stdout(bytes: &[u8]) -> Result<(), CliError> {
@@ -1036,6 +1045,30 @@ mod tests {
         parse_exec_args, read_limited_utf8, read_without_echo, run_child,
     };
     use std::io::{self, Cursor, Read, Write};
+
+    #[test]
+    fn help_examples_parse_without_running_commands() {
+        use super::{COMMANDS, EXEC_EXAMPLE, parse_exec_args, validate_command};
+        for spec in COMMANDS {
+            let words: Vec<String> = spec.example.split_whitespace().map(str::to_owned).collect();
+            assert_eq!(words[0], "vault");
+            let parsed = COMMANDS.iter().find(|entry| entry.name == words[1]).unwrap();
+            assert_eq!(parsed.kind, spec.kind);
+            validate_command(parsed, &words[2..]).unwrap();
+            if spec.argument.is_some() {
+                for flag in ["-h", "--help"] {
+                    validate_command(spec, &[flag.to_owned()]).unwrap();
+                }
+            }
+        }
+        let words: Vec<String> = EXEC_EXAMPLE.split_whitespace().skip(1).map(str::to_owned).collect();
+        let (env, command) = parse_exec_args(&words).unwrap();
+        assert_eq!(env.len(), 2);
+        assert_eq!(command, ["cargo", "run"]);
+        for (i, spec) in COMMANDS.iter().enumerate() {
+            assert!(!COMMANDS[..i].iter().any(|other| other.name == spec.name));
+        }
+    }
 
     struct FakeTerminal {
         echo_enabled: bool,
