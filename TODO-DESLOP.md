@@ -97,10 +97,16 @@ remain undone; DSLP-4 remains open. No source or test inputs changed in this
 continuation. The owner resumed on 2026-11-16. The resumed branch merges
 current main and adds a process-level trust-boundary check. An unconditional
 trusted-directory success now fails that check; source restoration passes.
-The focused test, full native suite and lint pass. The remaining 64 original
-survivors, 59 untested cases, fresh mutation qualification, coverage and quiet-host
-cost comparison stay open. [The filesystem record](docs/deslop-filesystem.md)
-contains the exact boundary and proof limits; DSLP-4 remains open.
+Literal metadata tables now guard owner, write-bit and root-sticky policy.
+The complete 21-mutant directory-policy Scenario is qualified: all caught,
+none missed, unviable or timed out, with every identity and assertion checked.
+It covers all seven saved survivors in this region; 58 original survivors and
+59 untested cases remain. The restored source passes an isolated-target full
+suite (44 unit, 28 integration, four terminal, two hardware cases ignored) and
+lint. A first final run reused the last mutant's shared-target artifact and
+was rejected. Coverage, quiet-host cost and the remaining regions keep DSLP-4
+open. [The filesystem record](docs/deslop-filesystem.md) retains exact proof
+and limits.
 
 ## Tickets
 

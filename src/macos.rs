@@ -1370,6 +1370,7 @@ mod tests {
         PRIVATE_DIRECTORY_MODE, validate_recovery_identity, CacheClearResult,
         cache_socket_path, clear_identity_cache_at, fetch_cached_identity,
         serve_cache, store_cached_identity,
+        ensure_owned_data_home, ensure_trusted_directory,
     };
     use age::secrecy::{ExposeSecret, SecretString};
     use std::ffi::OsString;
@@ -1465,6 +1466,51 @@ mod tests {
 
         fs::set_permissions(test_dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
         assert!(open_data_home(test_dir.path(), false).is_err());
+    }
+
+    #[test]
+    fn trusted_directory_metadata_distinguishes_root_sticky_and_foreign_owners() {
+        let test_dir = TestDir::new();
+        let mut metadata = rustix::fs::stat(test_dir.path()).unwrap();
+        let owner = rustix::process::geteuid().as_raw();
+        let foreign = owner.wrapping_add(1).max(1);
+        let writable = Err("vault: fixture is writable by other users");
+        let unexpected = Err("vault: fixture has an unexpected owner");
+        for (uid, permissions, expected) in [
+            (owner, 0o700, Ok(())), (owner, 0o755, Ok(())),
+            (owner, 0o770, writable), (owner, 0o702, writable),
+            (0, 0o755, Ok(())), (0, 0o777, writable),
+            (0, 0o1777, Ok(())), (0, 0o1770, Ok(())), (0, 0o1702, Ok(())),
+            (foreign, 0o755, unexpected), (foreign, 0o1777, unexpected),
+        ] {
+            metadata.st_uid = uid;
+            metadata.st_mode = (metadata.st_mode & !0o7777) | permissions;
+            assert_eq!(ensure_trusted_directory(&metadata, "fixture"), expected.map_err(str::to_owned), "uid {uid}, mode {permissions:o}");
+        }
+        if owner != 0 {
+            metadata.st_uid = owner;
+            metadata.st_mode = (metadata.st_mode & !0o7777) | 0o1777;
+            assert_eq!(ensure_trusted_directory(&metadata, "fixture"), writable.map_err(str::to_owned));
+        }
+    }
+
+    #[test]
+    fn owned_data_home_metadata_requires_current_owner_and_no_shared_writes() {
+        let test_dir = TestDir::new();
+        let mut metadata = rustix::fs::stat(test_dir.path()).unwrap();
+        let owner = rustix::process::geteuid().as_raw();
+        let foreign = owner.wrapping_add(1).max(1);
+        let writable = Err("vault: application support directory is writable by other users");
+        let unexpected = Err("vault: application support directory is not owned by the current user");
+        for (uid, permissions, expected) in [
+            (owner, 0o700, Ok(())), (owner, 0o755, Ok(())),
+            (owner, 0o770, writable), (owner, 0o702, writable), (owner, 0o1777, writable),
+            (foreign, 0o700, unexpected), (foreign, 0o1777, unexpected),
+        ] {
+            metadata.st_uid = uid;
+            metadata.st_mode = (metadata.st_mode & !0o7777) | permissions;
+            assert_eq!(ensure_owned_data_home(&metadata), expected.map_err(str::to_owned), "uid {uid}, mode {permissions:o}");
+        }
     }
 
     #[test]
