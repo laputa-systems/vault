@@ -65,6 +65,44 @@ fn cache_daemon_rejects_an_empty_seed() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn cache_daemon_rejects_either_missing_seed_field() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let home = CacheHome(std::env::temp_dir().join(format!("vs{}", std::process::id())));
+    std::fs::create_dir(&home.0).unwrap();
+    for seed in [b"\nidentity\n".as_slice(), b"recipient\n\n", b"\n\n"] {
+        let child = Command::new(env!("CARGO_BIN_EXE_vault"))
+            .arg("__cache-daemon").env("XDG_DATA_HOME", &home.0)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap();
+        let mut child = ChildGuard(Some(child));
+        child.0.as_mut().unwrap().stdin.take().unwrap().write_all(seed).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "invalid-seed daemon exceeded its deadline");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let out = child.0.take().unwrap().wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr)
+            .contains("identity cache seed is missing the recipient or identity"), "{:?}", out.stderr);
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct CacheHome(std::path::PathBuf);
 
 #[cfg(target_os = "macos")]

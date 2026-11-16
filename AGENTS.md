@@ -22,6 +22,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; CI requires rage 0.12.1 from the checksum-pinned owned release, installed by `scripts/install-rage.sh`; developer skips remain visible.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
 - macOS cache socket protocol: `src/macos.rs` identity cache tests and accept-refusal interposition; Linux keyring assertions can skip when unavailable and `make test` reports and counts the skip. Required host checks: `tests/security_linux/README.md`.
+- macOS cache startup and cached secret operations: `cargo test --test cache_spawn`; it uses a disposable RAM identity, private directory and owned daemon, without a real hardware key or prompt. Integration checks reject either missing daemon-seed field.
 - Public library API and network endpoints: none; this is a CLI.
 - Performance workload: none; no benchmark or established user-visible performance gate exists.
 

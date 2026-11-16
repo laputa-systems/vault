@@ -1,4 +1,6 @@
 exclude_re = [
+    # A fresh owned fork child inherits another PGID and cannot have PID 1. XNU setsid succeeds with that child's PID, so neither comparison matches: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c#L461-L505
+    '^src/macos\.rs:553:28: delete - in spawn_cache_daemon$',
     # At most 16 MiB is encrypted; age 0.13 adds a bounded single-recipient header and 16 bytes per 64 KiB, so ciphertext never reaches 17 MiB and both comparisons are false.
     '^src/macos\.rs:137:29: replace > with == in set_secret_at$',
     # At most 16 MiB is encrypted; age 0.13 adds a bounded single-recipient header and 16 bytes per 64 KiB, so ciphertext never reaches 17 MiB and both comparisons are false.

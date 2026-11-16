@@ -41,8 +41,48 @@ rage interoperability scenario executes with the checksum-pinned owned rage
 negative control under CI fails with the required-version assertion. The two
 keyring checks visibly skip because the container denies keyring syscalls;
 `tests/security_linux/README.md` defines the required separate host check.
-CI now includes native macOS and retains mutation artifacts; final store gate,
-coverage and uncontended test-cost qualification remain pending.
+CI now includes native macOS and retains mutation artifacts.
+
+The Linux store gate at `a0337e2` selects 51: 45 caught, six unviable, zero
+missed or timed out in 808.4 seconds. A test of literal ciphertext file bounds
+catches the five earlier constant survivors. The closed, unmerged control
+PR #31 at `e00a9c1` deletes a real limit test and adds a reachable uncovered
+validation branch: ordinary checks pass, but mutation reports 55 selected,
+37 caught, 12 missed and six unviable. No control code is in this candidate.
+
+The earlier attribution of four cache survivors to hardware authentication
+was too broad. `tests/cache_spawn.rs` includes the actual production modules
+in a disposable process, starts the actual detached cache daemon and supplies
+only a generated RAM identity through its private seed pipe. A structurally
+valid but unusable sidecar is checked with interaction disallowed before
+cached public secret operations run. No real key or authentication prompt is
+used. An owned-child guard reaps the daemon, and its watchdog exits when the
+recorded parent disappears, including a parent that dies before child startup.
+The probe checks cache handoff, set/get/list/delete/purge, duplicate reads,
+failed recovery and the literal 900-second cache TTL.
+
+The native macOS cache/store component now selects 98 production mutants:
+69 caught, 29 unviable, zero missed or timed out in about seven minutes.
+The 98 are all generated mutants in the 24 selected functions, whereas the
+old 79-case run selected only a subset within those functions. They are not
+matched score comparisons. One newly selected seed OR/AND survivor is caught
+by the process contract for either missing field; its focused mutant run
+also reports one caught. The third exact exclusion is XNU's `setsid() == -1`
+minus deletion: a fresh owned fork child cannot inherit its own PGID or PID 1,
+so successful `setsid` returns that child's PID and both comparisons are false.
+The XNU source/precondition is linked in `.cargo/mutants.toml`. There is no
+accepted-risk exclusion in this component.
+
+A full macOS-file selection contains 330 mutants and remains unqualified.
+The initial run was interrupted after discovering the larger scope. A later
+six-worker attempt exceeded the six-core guard; neither is a pass. A local
+copy attempt also recursively copied scratch because the tool did not honor
+the worktree's info-exclude. Tracked `/.work/` exclusion and explicit
+`--gitignore true` prevent the demonstrated recursion. A partial regex-only
+selection omitted function-return mutants and was interrupted, not accepted;
+the final 98-case selection includes both return and expression operators.
+Remaining filesystem, execution and platform dispositions, final coverage,
+uncontended test cost and the new exact-head CI gate remain open.
 
 ## Tickets
 

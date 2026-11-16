@@ -3,6 +3,10 @@ name = "vault"
 version = "0.2.0"
 edition = "2024"
 
+[[test]]
+name = "cache_spawn"
+harness = false
+
 [dependencies]
 age = { version = "0.13.0", registry = "mycrates", default-features = false }
 rustix = { version = "1", features = ["fs", "process", "termios"] }
