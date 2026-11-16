@@ -94,7 +94,13 @@ and `.work/tmp/macos-filesystem-qualified.log`; the bounded driver is
 six guarded cores, a 60-second test timeout and `macos::tests::` filtering.
 The unmutated baseline passed. Survivor dispositions and any test changes
 remain undone; DSLP-4 remains open. No source or test inputs changed in this
-continuation. Work is stopped; resume only at the owner's request.
+continuation. The owner resumed on 2026-11-16. The resumed branch merges
+current main and adds a process-level trust-boundary check. An unconditional
+trusted-directory success now fails that check; source restoration passes.
+The focused test, full native suite and lint pass. The remaining 64 original
+survivors, 59 untested cases, fresh mutation qualification, coverage and quiet-host
+cost comparison stay open. [The filesystem record](docs/deslop-filesystem.md)
+contains the exact boundary and proof limits; DSLP-4 remains open.
 
 ## Tickets
 
