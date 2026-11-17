@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,7 @@ static void event(char kind, int number, int fail) {
 }
 typedef void (*handler)(int);
 static handler fault_signal(int sig, handler fn) {
-    if (!active()) return signal(sig, fn);
+    if (!active() || (getenv("VAULT_SIGNAL_MODE") && strncmp(getenv("VAULT_SIGNAL_MODE"), "io-", 3) == 0)) return signal(sig, fn);
     ++signal_calls;
     int fail = (mode("caller-restore") && signal_calls == 1)
         || ((mode("install") || mode("combined")) && signal_calls == 2)
@@ -38,7 +39,7 @@ static handler fault_signal(int sig, handler fn) {
     return signal(sig, fn);
 }
 static int fault_interrupt(int sig, int flag) {
-    if (!active()) return siginterrupt(sig, flag);
+    if (!active() || (getenv("VAULT_SIGNAL_MODE") && strncmp(getenv("VAULT_SIGNAL_MODE"), "io-", 3) == 0)) return siginterrupt(sig, flag);
     ++interrupt_calls;
     int fail = mode("interrupt") && interrupt_calls == 2;
     event('I', sig, fail);
@@ -46,13 +47,46 @@ static int fault_interrupt(int sig, int flag) {
     return siginterrupt(sig, flag);
 }
 static int fault_raise(int sig) {
-    if (!active()) return raise(sig);
+    if (!active() || (getenv("VAULT_SIGNAL_MODE") && strncmp(getenv("VAULT_SIGNAL_MODE"), "io-", 3) == 0)) return raise(sig);
     int fail = mode("raise");
     event('R', sig, fail);
     if (fail) { errno = ESRCH; return -1; }
     return raise(sig);
 }
+static int fault_open(const char *path, int flags, ...) {
+    int create_mode = 0;
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        create_mode = va_arg(args, int);
+        va_end(args);
+    }
+    if (strcmp(path, "/dev/tty") == 0 && mode("io-open") && active()) {
+        event('O', 1, 1);
+        errno = EIO;
+        return -1;
+    }
+    return open(path, flags, create_mode);
+}
+/* The child owns its controlling PTY; restrict faults to its /dev/tty descriptors. */
+static ssize_t fault_write(int fd, const void *buf, size_t count) {
+    char path[PATH_MAX];
+    if (active() && fd != STDERR_FILENO && fcntl(fd, F_GETPATH, path) == 0
+        && strcmp(path, "/dev/tty") == 0) {
+        int prompt = count == 14 && memcmp(buf, "owned prompt: ", 14) == 0;
+        int newline = count == 1 && memcmp(buf, "\n", 1) == 0;
+        if ((mode("io-prompt") && prompt) || (mode("io-newline") && newline)) {
+            event('W', prompt ? 1 : 2, 1);
+            errno = EIO;
+            return -1;
+        }
+    }
+    return write(fd, buf, count);
+}
 #define INTERPOSE(replacement, original) __attribute__((used)) static struct { const void *replacement_fn; const void *original_fn; } interpose_##replacement __attribute__((section("__DATA,__interpose"))) = { (const void *)replacement, (const void *)original }
 INTERPOSE(fault_signal, signal);
 INTERPOSE(fault_interrupt, siginterrupt);
 INTERPOSE(fault_raise, raise);
+
+INTERPOSE(fault_write, write);
+INTERPOSE(fault_open, open);
