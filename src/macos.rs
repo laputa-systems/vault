@@ -1417,15 +1417,59 @@ mod tests {
 
     #[test]
     fn application_support_path_uses_xdg_or_macos_default() {
+        let cases = [
+            (
+                "absolute XDG path",
+                Some(OsString::from("/custom/data")),
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/custom/data")),
+            ),
+            (
+                "relative XDG falls back",
+                Some(OsString::from("relative")),
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/home/user/Library/Application Support")),
+            ),
+            (
+                "absent XDG falls back",
+                None,
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/home/user/Library/Application Support")),
+            ),
+            (
+                "empty XDG falls back",
+                Some(OsString::new()),
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/home/user/Library/Application Support")),
+            ),
+            (
+                "missing HOME errors when XDG is absent",
+                None,
+                None,
+                Err("vault: HOME is not set and XDG_DATA_HOME is not absolute".to_owned()),
+            ),
+            (
+                "missing HOME errors when XDG is relative",
+                Some(OsString::from("relative")),
+                None,
+                Err("vault: HOME is not set and XDG_DATA_HOME is not absolute".to_owned()),
+            ),
+            (
+                "relative HOME keeps existing error",
+                None,
+                Some(OsString::from("relative-home")),
+                Err("vault: HOME must be an absolute path".to_owned()),
+            ),
+        ];
+        for (label, xdg, home, expected) in cases {
+            assert_eq!(data_home_from(xdg, home), expected, "{label}");
+        }
+
+        use std::os::unix::ffi::OsStringExt;
+        let xdg = OsString::from_vec(b"/custom/\xffdata".to_vec());
         assert_eq!(
-            data_home_from(Some(OsString::from("/custom/data")), Some(OsString::from("/home/user")))
-                .unwrap(),
-            std::path::PathBuf::from("/custom/data")
-        );
-        assert_eq!(
-            data_home_from(Some(OsString::from("relative")), Some(OsString::from("/home/user")))
-                .unwrap(),
-            std::path::PathBuf::from("/home/user/Library/Application Support")
+            data_home_from(Some(xdg.clone()), Some(OsString::from("/home/user"))),
+            Ok(PathBuf::from(xdg))
         );
     }
 

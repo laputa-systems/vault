@@ -141,3 +141,25 @@ selecting the codec unit test through `--cargo-test-arg=--bin
 The result remains 31 caught, four equivalent misses, one unviable and no
 timeouts; raw tool exit 2 remains visible. This omits unrelated cache waits from
 the mutation runner. Full ordinary verification still runs the entire suite.
+
+## Data-home resolver Scenario
+
+On macOS arm64, base `8dc8fa8`, `application_support_path_uses_xdg_or_macos_default`
+now compares independent literal outcomes for absolute, relative, absent and
+empty XDG values, plus absent and relative HOME errors. An absolute XDG path
+containing a non-UTF-8 byte remains an `OsString`/`PathBuf` roundtrip. The test
+does not access the filesystem or impose validation beyond the resolver's
+existing absolute-HOME check. Inverting the absolute-XDG condition fails the
+`/custom/data` literal assertion; restoring it passes.
+
+Cargo-mutants 27.1.0 listed the complete `data_home_from` selection, including
+the function-return replacement and both unary-expression mutations (three
+total). A fresh baseline passed under the exclusive mutation lock with the
+owning unit test selected. All three were caught: return replacement fails the
+absolute-XDG case, removing the XDG absolute-path negation fails the relative
+fallback case, and removing the HOME absolute-path negation fails the expected
+relative-HOME error. There were zero missed, unviable or timed-out mutants and
+no exclusions. With a separate final target, `make test` passes (44 unit, 28
+integration and four terminal tests; two hardware tests ignored, no optional
+skips) and `make lint` passes with warnings denied. No timing claim is made.
+Other filesystem regions remain open, so DSLP-4 remains open.
