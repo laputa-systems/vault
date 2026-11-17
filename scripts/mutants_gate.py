@@ -22,10 +22,14 @@ class GateError(Exception):
     pass
 
 
-def untested(pending):
+class BudgetExhausted(GateError):
+    pass
+
+
+def budget_message(pending):
     shown = ', '.join(pending[:10])
     more = f' and {len(pending) - 10} more' if len(pending) > 10 else ''
-    return f'budget exhausted; {len(pending)} untested: {shown}{more}'
+    return f'budget exhausted; {len(pending)} unresolved: {shown}{more}'
 
 
 def classify(path, status, config):
@@ -76,7 +80,7 @@ def parse_changes(data):
     return changes
 
 
-def read_results(path, selected, *, baseline=True):
+def read_results(path, selected, *, baseline=True, complete=True):
     try:
         data = json.loads(path.read_text())
         outcomes = data['outcomes']
@@ -109,7 +113,8 @@ def read_results(path, selected, *, baseline=True):
             results[name] = summary
         if baselines != int(baseline):
             raise ValueError('missing or duplicate baseline')
-        if set(results) != set(selected) or data['total_mutants'] != len(selected):
+        if (not results.keys() <= set(selected) or
+                (complete and len(results) != len(selected)) or data['total_mutants'] != len(results)):
             raise ValueError('tested count or identities differ from selection')
         for kind in summaries.values():
             if data[kind] != list(results.values()).count(kind):
@@ -282,7 +287,7 @@ def main():
     def run(args, *, allowed=(0,), capture=True):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise GateError(untested(pending))
+            raise BudgetExhausted(budget_message(pending))
         process = subprocess.Popen(args, cwd=ROOT, text=True, stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.PIPE if capture else None, start_new_session=True)
         try:
@@ -290,7 +295,7 @@ def main():
         except subprocess.TimeoutExpired as error:
             os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
-            raise GateError(untested(pending)) from error
+            raise BudgetExhausted(budget_message(pending)) from error
         except BaseException:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -426,14 +431,23 @@ def main():
             pending[:] = [n for _, _, ns in phases[index:] for n in ns]
             print(f'phase: {label}; selected {len(names)}', flush=True)
             out = run_root / f'phase-{index}'
-            run(common + ['--baseline', 'run', '--timeout', str(config['timeout_seconds']),
-                '--build-timeout', str(config['build_timeout_seconds']), '--jobs', str(config['jobs']),
-                '--output', str(out)] + args, allowed=(0, 2, 3), capture=False)
-            results = read_results(out / 'mutants.out/outcomes.json', names)
+            receipt = out / 'mutants.out/outcomes.json'
+            budget_error = None
+            try:
+                run(common + ['--baseline', 'run', '--timeout', str(config['timeout_seconds']),
+                    '--build-timeout', str(config['build_timeout_seconds']), '--jobs', str(config['jobs']),
+                    '--output', str(out)] + args, allowed=(0, 2, 3), capture=False)
+            except BudgetExhausted as error:
+                if not receipt.is_file():
+                    raise
+                budget_error = error
+            results = read_results(receipt, names, complete=budget_error is None)
             for name, result in results.items():
                 counts[result] += 1
                 if result != 'timeout':
                     pending.remove(name)
+            if budget_error is not None:
+                raise BudgetExhausted(budget_message(pending)) from budget_error
             for number, name in enumerate(n for n, v in results.items() if v == 'timeout'):
                 regex = '^' + re.sub(r'([\\.^$|?*+()\[\]{}])', r'\\\1', name) + '$'
                 retry_args = ['--re', regex]
