@@ -462,3 +462,48 @@ separate from mutation, `cpu-guard --cores 2 -- make test` exits 0 (56 unit,
 zero optional skips) and `cpu-guard --cores 2 -- make lint` exits 0. The unit
 output also includes an isolated child invocation. No coverage rerun or
 performance claim is made.
+
+## Staging and listing Scenario
+
+On macOS arm64, base `7db74f652af5cffc2fee21d956f1dc4dfcc091ec`,
+`src/macos.rs` SHA-256 `21a77c9ffe1d21850122b29a137505d0faad6716c53dd8263c35a2beb9779675`,
+the owned fixtures check literal encoded names, sorted decoded names, directory
+entries, symlink admission, private staging descriptors, collision exhaustion,
+and cleanup including nested-directory refusal and preservation of primary
+errors. The sibling symlink target remains unchanged. The filesystem rejected
+an invalid UTF-8 filename with EILSEQ; that case is explicitly unrun here.
+A regular file descriptor produces a directory-read error. Concurrent replacement,
+entry disappearance, individual syscall failures and other OS filesystems remain
+unrun. Cleanup may remove earlier entries before refusing a nested directory;
+no directory iteration order or atomic cleanup is assumed.
+
+Changing the managed-name predicate to include symlinks regardless of the flag
+made `staging_list_names_and_enumeration` fail (exit 101, unexpected `L`);
+restoring it passes (exit 0). The fresh mutation baseline selected three tests.
+Cargo-mutants 27.1.0 completed 19 generated return and expression mutants:
+15 caught, four unviable, zero missed, timeout or untested. All caught logs
+were inspected and fail the fixture assertions; the four unviable replacements
+require `File: Default` and fail compilation. No exclusions were used. The
+outer command's exit status was not captured, although the complete raw
+outcomes and baseline are available in `.work/staging-mutants/mutants.out`.
+
+The 17 original untested identities map by function and expression to 15 caught
+(remove-staging two, remove-entries one, cleanup-failure two, managed-names
+five, directory-names five) and two unviable staging-creation return replacements.
+The extracted helper adds two unviable return replacements. The historical
+232-case result remains unchanged. Four original untested identities in
+`format_secure_enclave_error` and `io_error`, nine saved misses, hardware and
+other platform and race evidence remain open; DSLP-4 remains open.
+
+With PATH prefixed by `/Users/josh/d/stuff/.work/tools/bin`, TMPDIR set to
+`$PWD/.work/tmp`, RUSTC_WRAPPER=kache, CARGO_BUILD_JOBS=1 and
+RUST_TEST_THREADS=1, the mutation command was:
+
+```sh
+CARGO_TARGET_DIR=$PWD/.work/target-staging-mutants timeout -k 5 1200 sh -c 'while ! mkdir /Users/josh/d/stuff/.work/tmp/mutation.lock 2>/dev/null; do sleep 2; done; trap "rmdir /Users/josh/d/stuff/.work/tmp/mutation.lock" EXIT; cpu-guard --cores 2 -- cargo mutants --gitignore true --file src/macos.rs --re "(in (directory_names|managed_names|create_staging_directory|create_staging_directory_with|remove_directory_entries|remove_staging_directory|cleanup_failure)|replace (directory_names|managed_names|create_staging_directory|create_staging_directory_with|remove_directory_entries|remove_staging_directory|cleanup_failure) ->)" --baseline run --timeout 60 --build-timeout 300 --jobs 1 --no-shuffle --output .work/staging-mutants --cargo-test-arg=--bin --cargo-test-arg=vault --cargo-test-arg=macos::tests::staging_list'
+```
+
+With the separate `CARGO_TARGET_DIR=$PWD/.work/target-staging-final`,
+`cpu-guard --cores 2 -- make test` and `cpu-guard --cores 2 -- make lint`
+exit 0. Tests report 59 unit, 28 integration and four terminal passes, two
+hardware ignores and zero optional skips. No coverage or performance claim is made.

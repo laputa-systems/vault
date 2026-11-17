@@ -1449,6 +1449,101 @@ mod tests {
     }
 
     #[test]
+    fn staging_list_names_and_enumeration() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        for name in ["7a.age", "41.age", "c3a9.age", "junk", "4G.age", "414.age"] {
+            fs::write(fixture.path().join(name), b"dummy").unwrap();
+        }
+        fs::create_dir(fixture.path().join("42.age")).unwrap();
+        fs::write(fixture.path().join("sentinel"), b"unchanged").unwrap();
+        symlink("sentinel", fixture.path().join("4c.age")).unwrap();
+        let invalid = OsString::from_vec(vec![0xff]);
+        let non_utf8 = match fs::write(fixture.path().join(&invalid), b"dummy") {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::ILSEQ.raw_os_error()) => {
+                eprintln!("non-UTF-8 filename case unrun: {error}");
+                false
+            }
+            Err(error) => panic!("create non-UTF-8 filename: {error}"),
+        };
+        let mut actual: Vec<_> = super::directory_names(&dir).unwrap().into_iter().map(|s| s.into_bytes()).collect();
+        actual.sort();
+        let mut expected: Vec<Vec<u8>> = ["7a.age", "41.age", "c3a9.age", "junk", "4G.age", "414.age", "42.age", "sentinel", "4c.age"].iter().map(|s| s.as_bytes().to_vec()).collect();
+        if non_utf8 { expected.push(vec![0xff]); }
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert_eq!(super::managed_names(&dir, false).unwrap(), ["A", "z", "é"]);
+        assert_eq!(super::managed_names(&dir, true).unwrap(), ["A", "L", "z", "é"]);
+        let file = fs::File::open(fixture.path().join("sentinel")).unwrap();
+        assert!(super::directory_names(&file).unwrap_err().starts_with("vault: read directory"));
+        assert!(super::managed_names(&file, false).is_err());
+    }
+
+    #[test]
+    fn staging_list_creation_and_cleanup() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let fixture = TestDir::new();
+        let data = fs::File::open(fixture.path()).unwrap();
+        let (name, stage) = create_staging_directory(&data).unwrap();
+        let (second, second_fd) = create_staging_directory(&data).unwrap();
+        assert_ne!(name, second);
+        assert!(name.starts_with(&format!(".vault-init-{}-", std::process::id())));
+        assert_eq!(stage.metadata().unwrap().ino(), fs::metadata(fixture.path().join(&name)).unwrap().ino());
+        assert_eq!(stage.metadata().unwrap().permissions().mode() & 0o7777, 0o700);
+        drop(second_fd);
+        super::remove_staging_directory(&data, &second).unwrap();
+        fs::write(fixture.path().join("sentinel"), b"unchanged").unwrap();
+        fs::create_dir(fixture.path().join(&name).join("secrets")).unwrap();
+        fs::write(fixture.path().join(&name).join("secrets/dummy"), b"dummy").unwrap();
+        fs::write(fixture.path().join(&name).join("dummy"), b"dummy").unwrap();
+        symlink(fixture.path().join("sentinel"), fixture.path().join(&name).join("secrets/link")).unwrap();
+        drop(stage);
+        assert_eq!(cleanup_failure(&data, &name, "primary".into()), "primary");
+        assert!(!fixture.path().join(&name).exists());
+        assert_eq!(fs::read(fixture.path().join("sentinel")).unwrap(), b"unchanged");
+        fs::create_dir(fixture.path().join("occupied")).unwrap();
+        let mut calls = 0;
+        let error = super::create_staging_directory_with(&data, || { calls += 1; "occupied".into() }).unwrap_err();
+        assert_eq!(calls, 32);
+        assert_eq!(error, "vault: could not allocate an initialization directory");
+        let mut calls = 0;
+        let (after, after_fd) = super::create_staging_directory_with(&data, || { calls += 1; if calls == 1 { "occupied".into() } else { "available".into() } }).unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(after, "available");
+        drop(after_fd);
+        super::remove_staging_directory(&data, &after).unwrap();
+        let file = fs::File::open(fixture.path().join("sentinel")).unwrap();
+        assert!(create_staging_directory(&file).unwrap_err().starts_with("vault: create initialization directory failed:"));
+    }
+
+    #[test]
+    fn staging_list_cleanup_refuses_nested_directories() {
+        let fixture = TestDir::new();
+        let data = fs::File::open(fixture.path()).unwrap();
+        fs::create_dir(fixture.path().join("stage")).unwrap();
+        fs::create_dir(fixture.path().join("stage/secrets")).unwrap();
+        fs::create_dir(fixture.path().join("stage/secrets/nested")).unwrap();
+        fs::write(fixture.path().join("stage/secrets/nested/sentinel"), b"unchanged").unwrap();
+        let error = cleanup_failure(&data, "stage", "primary".into());
+        assert_eq!(error, "primary; initialization cleanup failed: vault: unexpected nested directory in staged secret");
+        assert_eq!(fs::read(fixture.path().join("stage/secrets/nested/sentinel")).unwrap(), b"unchanged");
+        fs::remove_dir_all(fixture.path().join("stage/secrets")).unwrap();
+        fs::write(fixture.path().join("stage/secrets"), b"dummy").unwrap();
+        assert_eq!(super::remove_staging_directory(&data, "stage").unwrap_err(), "vault: staged secrets path is not a directory");
+        fs::remove_file(fixture.path().join("stage/secrets")).unwrap();
+        fs::create_dir(fixture.path().join("stage/nested")).unwrap();
+        assert_eq!(super::remove_staging_directory(&data, "stage").unwrap_err(), "vault: unexpected nested directory in staged initialization file");
+        assert!(fixture.path().join("stage/nested").is_dir());
+        fs::remove_dir(fixture.path().join("stage/nested")).unwrap();
+        super::remove_staging_directory(&data, "stage").unwrap();
+        let error = cleanup_failure(&data, "missing", "primary".into());
+        assert!(error.starts_with("primary; initialization cleanup failed: vault:"));
+    }
+
+    #[test]
     fn atomic_file_replacement_and_admission() {
         use std::os::unix::fs::{symlink, MetadataExt};
         let fixture = TestDir::new();
