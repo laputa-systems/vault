@@ -1258,16 +1258,8 @@ fn remove_directory_entries(dir: &File, label: &str) -> Result<(), String> {
 fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), String> {
     validate_filename(destination)?;
     match statat(dir, destination, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) if !FileType::from_raw_mode(stat.st_mode).is_file() => {
-            return Err(format!("vault: {destination} is not a regular file"));
-        }
-        Ok(stat) if stat.st_nlink != 1 => {
-            return Err(format!("vault: {destination} has an unexpected hard link"));
-        }
-        Ok(stat) if stat.st_uid != geteuid().as_raw() => {
-            return Err(format!("vault: {destination} is not owned by the current user"));
-        }
-        Ok(_) | Err(Errno::NOENT) => {}
+        Ok(stat) => ensure_atomic_destination_metadata(&stat, destination)?,
+        Err(Errno::NOENT) => {}
         Err(source) => return Err(io_error(&format!("inspect {destination}"), source)),
     }
     let (temporary, file) = create_temporary_file(dir)?;
@@ -1293,9 +1285,26 @@ fn atomic_write(dir: &File, destination: &str, contents: &[u8]) -> Result<(), St
     fsync(dir).map_err(|source| io_error("sync containing directory", source))
 }
 
+fn ensure_atomic_destination_metadata(stat: &rustix::fs::Stat, destination: &str) -> Result<(), String> {
+    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(format!("vault: {destination} is not a regular file"));
+    }
+    if stat.st_nlink != 1 {
+        return Err(format!("vault: {destination} has an unexpected hard link"));
+    }
+    if stat.st_uid != geteuid().as_raw() {
+        return Err(format!("vault: {destination} is not owned by the current user"));
+    }
+    Ok(())
+}
+
 fn create_temporary_file(dir: &File) -> Result<(String, File), String> {
+    create_temporary_file_with(dir, || next_temp_name(TEMP_PREFIX))
+}
+
+fn create_temporary_file_with(dir: &File, mut next_name: impl FnMut() -> String) -> Result<(String, File), String> {
     for _ in 0..32 {
-        let name = next_temp_name(TEMP_PREFIX);
+        let name = next_name();
         match openat(
             dir,
             name.as_str(),
