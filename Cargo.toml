@@ -15,6 +15,9 @@ zeroize = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+rustix = { version = "1", features = ["pty"] }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { version = "1", features = ["process", "stdio"] }
 

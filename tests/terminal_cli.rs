@@ -1,10 +1,13 @@
 #[cfg(unix)]
+#[path = "support/controlling_tty.rs"]
+mod controlling_tty;
+
+#[cfg(unix)]
 mod unix_pty {
-    use rustix::termios::{InputModes, LocalModes, OptionalActions, tcgetattr, tcsetattr};
-    use std::ffi::{c_char, c_int, c_void};
+    use rustix::termios::{LocalModes, tcgetattr};
+    use std::ffi::c_int;
     use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::os::fd::FromRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::os::unix::process::CommandExt;
@@ -19,16 +22,9 @@ mod unix_pty {
 
     static NEXT_DATA_HOME: AtomicU64 = AtomicU64::new(0);
 
-    #[link(name = "util")]
-    unsafe extern "C" {
-        fn openpty(
-            master: *mut c_int,
-            slave: *mut c_int,
-            name: *mut c_char,
-            termios: *const c_void,
-            window_size: *const c_void,
-        ) -> c_int;
-    }
+    use super::controlling_tty::open_pty;
+    #[cfg(target_os = "linux")]
+    use super::controlling_tty::launch_binary_with_controlling_tty;
 
     unsafe extern "C" {
         fn kill(process: c_int, signal: c_int) -> c_int;
@@ -46,33 +42,6 @@ mod unix_pty {
     const SIGCONT: c_int = 19;
     const WNOHANG: c_int = 1;
     const WUNTRACED: c_int = 2;
-
-    fn open_pty() -> io::Result<(File, File)> {
-        let mut master = -1;
-        let mut slave = -1;
-        let result = unsafe {
-            openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        if result == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        let (master, slave) = unsafe {
-            (
-                File::from_raw_fd(master),
-                File::from_raw_fd(slave),
-            )
-        };
-        let mut settings = tcgetattr(&slave).map_err(io::Error::from)?;
-        settings.input_modes &= !InputModes::ISTRIP;
-        tcsetattr(&slave, OptionalActions::Now, &settings).map_err(io::Error::from)?;
-        Ok((master, slave))
-    }
 
     struct TestDataHome(std::path::PathBuf);
 
@@ -113,36 +82,6 @@ mod unix_pty {
             &[],
             stdin,
         )
-    }
-
-    #[cfg(target_os = "linux")]
-    fn launch_binary_with_controlling_tty(
-        executable: &std::ffi::OsStr,
-        slave: &File,
-        data_home: &std::path::Path,
-        args: &[&str],
-        environment: &[(&str, &str)],
-        stdin: Stdio,
-    ) -> io::Result<Child> {
-        let mut command = Command::new(executable);
-        for (name, value) in environment {
-            command.env(name, value);
-        }
-        command
-            .args(args)
-            .env("XDG_DATA_HOME", data_home)
-            .stdin(stdin)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(slave.try_clone()?));
-        unsafe {
-            // SAFETY: The pre-exec closure only creates a session and attaches the inherited terminal.
-            command.pre_exec(|| {
-                rustix::process::setsid().map_err(io::Error::from)?;
-                rustix::process::ioctl_tiocsctty(rustix::stdio::stderr())
-                    .map_err(io::Error::from)
-            });
-        }
-        command.spawn()
     }
 
     #[cfg(target_os = "linux")]
