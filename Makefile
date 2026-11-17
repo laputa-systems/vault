@@ -20,12 +20,14 @@ coverage:
 	cargo llvm-cov report --branch --summary-only
 
 BASE ?= origin/main
+MUTANTS_PLATFORM ?= $(if $(filter Darwin,$(OS)),macos,linux)
+MUTANTS_SHARD ?=
 
 mutants-selftest:
 	python3 -B -m unittest discover -s scripts -p 'test_mutants_gate.py'
 
 mutants-diff: mutants-selftest
-	python3 -B scripts/mutants_gate.py "$(BASE)"
+	python3 -B scripts/mutants_gate.py "$(BASE)" "$(MUTANTS_PLATFORM)" "$(MUTANTS_SHARD)"
 
 install: dist
 	$(if $(filter Darwin,$(OS)),codesign --sign "$(SIGN_ID)" --force --timestamp=none target/$(TARGET)/dist/$(NAME),:)

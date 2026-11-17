@@ -18,10 +18,39 @@ defaults:
     shell: bash -euo pipefail {0}
 
 jobs:
-  mutants:
-    name: mutants
+  mutants-plan:
+    name: Plan mutation shards
     runs-on: ubuntu-26.04-arm
-    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, tomllib
+          with open('.cargo/mutants-gate.toml', 'rb') as config:
+              shards = tomllib.load(config)['shards']
+          if type(shards) is not int or not 1 <= shards <= 32:
+              raise SystemExit('invalid shard count')
+          jobs = [{'platform': platform, 'runner': runner, 'shard': shard}
+                  for platform, runner in [('linux', 'ubuntu-26.04-arm'), ('macos', 'xcode-27')]
+                  for shard in range(shards)]
+          print('matrix=' + json.dumps({'include': jobs}, separators=(',', ':')))
+          PY
+
+  mutants:
+    name: mutants (${{ matrix.platform }}, ${{ matrix.shard }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    needs: mutants-plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.mutants-plan.outputs.matrix) }}
     permissions:
       contents: read
     steps:
@@ -33,18 +62,25 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - name: Install pinned age interoperability tool
+        if: matrix.platform == 'linux'
         run: |
           sh scripts/install-rage.sh "$PWD/.work/tools/bin"
           echo "$PWD/.work/tools/bin" >> "$GITHUB_PATH"
       - name: mutants
         env:
           BASE_REF: ${{ github.base_ref }}
-          RUST_TEST_THREADS: 2
-        run: make mutants-diff BASE="origin/$BASE_REF"
+          RUST_TEST_THREADS: 1
+          CARGO_BUILD_JOBS: 1
+          MUTANTS_PLATFORM: ${{ matrix.platform }}
+          MUTANTS_SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p .work/tmp
+          export TMPDIR="$PWD/.work/tmp"
+          make mutants-diff BASE="origin/$BASE_REF"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: mutation-evidence
+          name: mutation-evidence-${{ matrix.platform }}-${{ matrix.shard }}
           path: .work/mutants-gate/
           include-hidden-files: true
 
@@ -118,7 +154,7 @@ jobs:
 
   ci:
     name: CI
-    needs: [linux-musl, macos, mutants]
+    needs: [linux-musl, macos, mutants-plan, mutants]
     if: always()
     runs-on: ubuntu-26.04-arm
     permissions:
@@ -133,7 +169,9 @@ jobs:
           LINUX_RESULT: ${{ needs.linux-musl.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
           MUTANTS_RESULT: ${{ needs.mutants.result }}
+          MUTANTS_PLAN_RESULT: ${{ needs.mutants-plan.result }}
         run: |
           test "$LINUX_RESULT" = success
           test "$MACOS_RESULT" = success
+          test "$MUTANTS_PLAN_RESULT" = success
           test "$MUTANTS_RESULT" = success

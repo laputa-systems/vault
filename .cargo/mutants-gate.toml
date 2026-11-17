@@ -3,4 +3,22 @@ irrelevant = ["*.md", "LICENSE", "LICENSE.*"]
 budget_seconds = 1200
 timeout_seconds = 180
 build_timeout_seconds = 300
-jobs = 3
+jobs = 1
+shards = 16
+max_per_shard = 20
+
+[[linux_critical]]
+file = "src/main.rs"
+function = "read_without_echo([^_a-z]|$)"
+
+[[macos_critical]]
+file = "src/store.rs"
+function = "."
+
+[[macos_critical]]
+file = "src/main.rs"
+function = "read_without_echo([^_a-z]|$)"
+
+[[macos_critical]]
+file = "src/macos.rs"
+function = "(cache|daemon|seed_line|set_socket_permissions|parse_put_payload)"
