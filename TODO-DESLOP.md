@@ -3,6 +3,12 @@ Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
+Private-file continuation: owned fixture and synthetic metadata witnesses cover
+admission, mode repair and post-metadata growth; the complete 34-mutant slice
+has 30 caught, three equivalent flag expressions and one unviable. Full native
+checks pass with two hardware tests ignored. The broader DSLP-4 remains open;
+see [filesystem evidence](docs/deslop-filesystem.md#private-file-admission-scenario).
+
 ## Report
 
 Ground: base `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`; macOS arm64, Rust nightly 1.102.0, `cpu-guard --cores 6`: fresh-target `make test` 15.23s, warm 4.43s, `make lint` 9.80s; all exit 0. Tests: 56 passed, two hardware authentication tests ignored. No vendored source trees found. No performance workload exists; no established user-visible performance gate. No runtime code changed.

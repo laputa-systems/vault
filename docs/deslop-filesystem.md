@@ -163,3 +163,51 @@ no exclusions. With a separate final target, `make test` passes (44 unit, 28
 integration and four terminal tests; two hardware tests ignored, no optional
 skips) and `make lint` passes with warnings denied. No timing claim is made.
 Other filesystem regions remain open, so DSLP-4 remains open.
+
+## Private-file admission Scenario
+
+On macOS arm64, base `bf7a1eb9c3e55f25ce3f92e9773fb6b11af19fee`, the
+private-file tests use owned TMPDIR fixtures for literal bytes at the limit,
+empty, missing and oversized files, symlink, hard link, directory and FIFO
+refusals, and repair from 0666 to 0600. An owned file's synthetic `Stat`
+checks foreign-owner refusal. Production-used metadata and bounded-reader
+helpers allow deterministic witnesses for a stream growing or shrinking after
+metadata inspection, preserving the original syscall order, preallocation,
+flags, read limit and errors. The FIFO check uses a deadline and reaps its
+child if opening blocks. No timing or memory equivalence is claimed.
+
+Removing the post-read size check made the growth assertion fail with four
+bytes returned; replacing chmod's target with 0666 made the repair assertion
+fail with the permissions error. Both hand faults were restored. The first
+mutation run had 28 caught, four missed, one unviable and one timeout: the
+FIFO-open flag mutant blocked the old in-process fixture. The bounded child
+and the shrinking-stream witness resolved those gaps.
+
+Cargo-mutants 27.1.0 generated 34 return and expression mutants across
+`ensure_regular_file`, `ensure_regular_metadata`, `set_file_mode`,
+`read_private_file`, and `read_private_contents`. The fresh baseline ran four
+owning tests. The final run exited 2: 30 caught, three missed, one unviable,
+zero timeouts or untested. All caught logs were inspected and failed the new
+assertions, including the FIFO deadline. The three misses replace `|` by `^`
+in the open flags: on this macOS target `RDONLY` is zero and `NOFOLLOW`,
+`CLOEXEC`, and `NONBLOCK` have disjoint bits, so all three produce the same
+flags. This is functional flag equivalence, not a timing or memory claim. The
+unviable size-comparison mutant parses `<` after `as u64` as generic syntax
+and does not compile. No exclusions were added.
+
+With the mutation lock held and `PATH=/Users/josh/d/stuff/.work/tools/bin:$PATH`,
+`TMPDIR=$PWD/.work/tmp`, `RUSTC_WRAPPER=kache`, `CARGO_BUILD_JOBS=1`,
+`RUST_TEST_THREADS=1`, and `CARGO_TARGET_DIR=$PWD/.work/target-private-mutants`:
+
+```sh
+timeout 1200 sh -c 'while ! mkdir /Users/josh/d/stuff/.work/tmp/mutation.lock 2>/dev/null; do sleep 2; done; trap "rmdir /Users/josh/d/stuff/.work/tmp/mutation.lock" EXIT HUP INT TERM; cpu-guard --cores 2 -- cargo mutants --gitignore true --file src/macos.rs --re "(in (ensure_regular_file|ensure_regular_metadata|set_file_mode|read_private_file|read_private_contents)|replace (ensure_regular_file|ensure_regular_metadata|set_file_mode|read_private_file|read_private_contents) ->)" --baseline run --timeout 60 --build-timeout 300 --jobs 1 --no-shuffle --output .work/private-mutants-final --cargo-test-arg=--bin --cargo-test-arg=vault --cargo-test-arg=macos::tests::private_file'
+```
+
+With the same environment except the separate
+`CARGO_TARGET_DIR=$PWD/.work/target-private-final`, `cpu-guard --cores 2 --
+make test` and `cpu-guard --cores 2 -- make lint` both exit 0. The suite has
+50 unit, 28 integration and four terminal tests passed, two hardware tests
+ignored, and zero optional skips. The original stopped 232-case run remains
+102 caught, 65 missed, six unviable and 59 untested; filename and data-home
+results are unchanged. Other regions, coverage and platform evidence remain
+open; DSLP-4 remains open.

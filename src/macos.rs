@@ -1378,7 +1378,8 @@ mod tests {
         PRIVATE_DIRECTORY_MODE, validate_recovery_identity, CacheClearResult,
         cache_socket_path, clear_identity_cache_at, fetch_cached_identity,
         serve_cache, store_cached_identity,
-        ensure_owned_data_home, ensure_trusted_directory,
+        ensure_owned_data_home, ensure_trusted_directory, ensure_regular_metadata,
+        read_private_file, read_private_contents, io_error,
     };
     use age::secrecy::{ExposeSecret, SecretString};
     use std::ffi::OsString;
@@ -1421,6 +1422,81 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn private_file_reads_and_repairs_owned_files() {
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("value"), b"abcd").unwrap();
+        fs::set_permissions(fixture.path().join("value"), fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 4).unwrap(), b"abcd");
+        assert_eq!(fs::metadata(fixture.path().join("value")).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap_err(), "vault: value exceeds the maximum file size");
+        fs::write(fixture.path().join("empty"), b"").unwrap();
+        assert_eq!(read_private_file(&dir, "empty", 0).unwrap(), b"");
+        assert_eq!(read_private_file(&dir, "missing", 4).unwrap_err(), "vault: missing: not found");
+    }
+
+    #[test]
+    fn private_file_rejects_links_and_nonregular_files() {
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("value"), b"yes").unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap(), b"yes");
+        std::os::unix::fs::symlink("value", fixture.path().join("link")).unwrap();
+        assert_eq!(read_private_file(&dir, "link", 3).unwrap_err(), io_error("open link", rustix::io::Errno::LOOP));
+        fs::hard_link(fixture.path().join("value"), fixture.path().join("hard")).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap_err(), "vault: value has an unexpected hard link");
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap(), b"yes");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        assert_eq!(read_private_file(&dir, "directory", 3).unwrap_err(), "vault: directory is not a regular file");
+    }
+
+    #[test]
+    fn private_file_fifo_is_rejected_without_waiting_for_a_writer() {
+        const CHILD_DIR: &str = "VAULT_PRIVATE_FILE_FIFO_CHILD";
+        if let Some(path) = std::env::var_os(CHILD_DIR) {
+            let dir = fs::File::open(path).unwrap();
+            assert_eq!(read_private_file(&dir, "fifo", 3).unwrap_err(), "vault: fifo is not a regular file");
+            return;
+        }
+        let fixture = TestDir::new();
+        assert!(std::process::Command::new("/usr/bin/mkfifo").arg(fixture.path().join("fifo")).status().unwrap().success());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "macos::tests::private_file_fifo_is_rejected_without_waiting_for_a_writer"])
+            .env(CHILD_DIR, fixture.path())
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO reader failed: {status}");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("FIFO reader did not return without a writer");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn private_file_metadata_and_growth_are_checked() {
+        let fixture = TestDir::new();
+        fs::write(fixture.path().join("value"), b"abc").unwrap();
+        let file = fs::File::open(fixture.path().join("value")).unwrap();
+        let mut metadata = rustix::fs::fstat(&file).unwrap();
+        let owner = rustix::process::geteuid().as_raw();
+        assert_eq!(ensure_regular_metadata(&metadata, owner, "value"), Ok(()));
+        metadata.st_uid = owner.wrapping_add(1);
+        assert_eq!(ensure_regular_metadata(&metadata, owner, "value").unwrap_err(), "vault: value is not owned by the current user");
+        assert_eq!(read_private_contents(&b"abc"[..], 3, "value", 3).unwrap(), b"abc");
+        assert_eq!(read_private_contents(&b"abc"[..], 4, "value", 3).unwrap_err(), "vault: value exceeds the maximum file size");
+        assert_eq!(read_private_contents(&b"abcd"[..], 3, "value", 3).unwrap_err(), "vault: value exceeds the maximum file size");
+        assert_eq!(read_private_contents(&b""[..], -1, "value", 3).unwrap_err(), "vault: value exceeds the maximum file size");
     }
 
     #[test]
