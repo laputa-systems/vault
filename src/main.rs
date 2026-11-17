@@ -1585,14 +1585,15 @@ mod tests {
             remaining: 100,
             bytes_read: 0,
         };
-        assert!(matches!(read_limited_utf8(&mut input, 3), Err(CliError::InputTooLarge(3))));
+        let error = read_limited_utf8(&mut input, 3).unwrap_err();
+        assert!(matches!(error, CliError::InputTooLarge(3)));
+        assert_eq!(error.to_string(), "vault: input exceeds 3 byte limit");
         assert_eq!(input.bytes_read, 6);
 
         let input = vec![b'x'; MAX_SECRET_BYTES + 1];
-        assert!(matches!(
-            read_limited_utf8(&input[..], MAX_SECRET_BYTES),
-            Err(CliError::InputTooLarge(MAX_SECRET_BYTES))
-        ));
+        let error = read_limited_utf8(&input[..], MAX_SECRET_BYTES).unwrap_err();
+        assert!(matches!(error, CliError::InputTooLarge(MAX_SECRET_BYTES)));
+        assert_eq!(error.to_string(), "vault: input exceeds 16 MiB limit");
     }
 
     #[test]
