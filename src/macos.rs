@@ -1445,6 +1445,92 @@ mod tests {
     }
 
     #[test]
+    fn atomic_file_replacement_and_admission() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let path = fixture.path().join("recipient");
+        super::atomic_write(&dir, "recipient", b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        super::atomic_write(&dir, "recipient", b"replacement").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+        fs::hard_link(&path, fixture.path().join("hard")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "recipient", b"bad").unwrap_err(), "vault: recipient has an unexpected hard link");
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&path).unwrap().ino(), fs::metadata(fixture.path().join("hard")).unwrap().ino());
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        symlink("recipient", fixture.path().join("link")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "link", b"bad").unwrap_err(), "vault: link is not a regular file");
+        assert_eq!(fs::read_link(fixture.path().join("link")).unwrap(), std::path::Path::new("recipient"));
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "directory", b"bad").unwrap_err(), "vault: directory is not a regular file");
+        assert_eq!(fs::read_dir(fixture.path().join("directory")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 3);
+        let mut stat = rustix::fs::stat(&path).unwrap();
+        stat.st_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
+        assert_eq!(super::ensure_atomic_destination_metadata(&stat, "recipient").unwrap_err(), "vault: recipient is not owned by the current user");
+        stat.st_nlink = 2;
+        assert_eq!(super::ensure_atomic_destination_metadata(&stat, "recipient").unwrap_err(), "vault: recipient has an unexpected hard link");
+        stat.st_mode = rustix::fs::stat(fixture.path().join("directory")).unwrap().st_mode;
+        assert_eq!(super::ensure_atomic_destination_metadata(&stat, "recipient").unwrap_err(), "vault: recipient is not a regular file");
+    }
+
+    #[test]
+    fn atomic_file_names_and_cleanup() {
+        for name in ["", "/", "a/b", "a\0b", ".", ".."] {
+            assert_eq!(super::validate_filename(name).unwrap_err(), "vault: invalid internal file name", "{name:?}");
+        }
+        for name in ["recipient", "identity.age", "identity.se", "544f4b454e.age", ".tmp-123-4"] {
+            assert_eq!(super::validate_filename(name), Ok(()), "{name:?}");
+        }
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("temp"), b"dummy").unwrap();
+        assert_eq!(super::cleanup_temporary_file(&dir, "temp", "primary".into()), "primary");
+        assert!(!fixture.path().join("temp").exists());
+        assert_eq!(super::cleanup_temporary_file(&dir, "temp", "primary".into()), "primary");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        let error = rustix::fs::unlinkat(&dir, "directory", rustix::fs::AtFlags::empty()).unwrap_err();
+        assert_eq!(super::cleanup_temporary_file(&dir, "directory", "primary".into()), format!("primary; temporary file cleanup failed: {error}"));
+        assert!(fixture.path().join("directory").is_dir());
+    }
+
+    #[test]
+    fn atomic_file_temporary_names_flags_and_collisions() {
+        use std::io::{Read, Write};
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let (first, mut file) = super::create_temporary_file(&dir).unwrap();
+        let (second, _) = super::create_temporary_file(&dir).unwrap();
+        let prefix = format!(".tmp-{}-", std::process::id());
+        assert!(first.starts_with(&prefix));
+        assert!(second.starts_with(&prefix));
+        assert_ne!(first, second);
+        assert!(first[prefix.len()..].parse::<u64>().is_ok());
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o7777, 0o600);
+        assert!(rustix::io::fcntl_getfd(&file).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        assert!(rustix::fs::fcntl_getfl(&file).unwrap().contains(rustix::fs::OFlags::WRONLY));
+        file.write_all(b"dummy").unwrap();
+        assert!(file.read(&mut [0]).is_err());
+        fs::write(fixture.path().join("collision"), b"original").unwrap();
+        let mut calls = 0;
+        let (name, _) = super::create_temporary_file_with(&dir, || { calls += 1; if calls == 1 { "collision".into() } else { "fresh".into() } }).unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(name, "fresh");
+        assert_eq!(fs::read(fixture.path().join("collision")).unwrap(), b"original");
+        let mut attempts = 0;
+        let err = super::create_temporary_file_with(&dir, || { attempts += 1; "collision".into() }).unwrap_err();
+        assert_eq!(attempts, 32);
+        assert_eq!(err, "vault: could not allocate a temporary encrypted file");
+        assert_eq!(fs::read(fixture.path().join("collision")).unwrap(), b"original");
+        assert_eq!(super::create_temporary_file_with(&dir, || "missing/child".into()).unwrap_err(), io_error("create temporary encrypted file", rustix::io::Errno::NOENT));
+    }
+
+    #[test]
     fn lock_mode_descriptor_and_admission() {
         use std::io::{Read, Seek, SeekFrom, Write};
         use std::os::unix::fs::symlink;
