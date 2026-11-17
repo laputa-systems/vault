@@ -1000,13 +1000,18 @@ fn open_directory_at(parent: &File, name: &str, label: &str) -> Result<File, Str
     .map_err(|source| io_error(&format!("open {label}"), source))?;
     let dir = File::from(fd);
     let metadata = fstat(&dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
+    ensure_opened_directory_metadata(&metadata, label)?;
+    Ok(dir)
+}
+
+fn ensure_opened_directory_metadata(metadata: &rustix::fs::Stat, label: &str) -> Result<(), String> {
     if !FileType::from_raw_mode(metadata.st_mode).is_dir() {
         return Err(format!("vault: {label} is not a directory"));
     }
     if metadata.st_uid != geteuid().as_raw() {
         return Err(format!("vault: {label} is not owned by the current user"));
     }
-    Ok(dir)
+    Ok(())
 }
 
 fn set_directory_mode(dir: &File, expected: u32, label: &str) -> Result<(), String> {
