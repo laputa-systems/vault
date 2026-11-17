@@ -1198,8 +1198,12 @@ fn format_secure_enclave_error(error: SecureEnclaveError) -> String {
 }
 
 fn create_staging_directory(data: &File) -> Result<(String, File), String> {
+    create_staging_directory_with(data, || next_temp_name(INIT_PREFIX))
+}
+
+fn create_staging_directory_with(data: &File, mut next_name: impl FnMut() -> String) -> Result<(String, File), String> {
     for _ in 0..32 {
-        let name = next_temp_name(INIT_PREFIX);
+        let name = next_name();
         match mkdirat(data, name.as_str(), mode(PRIVATE_DIRECTORY_MODE)) {
             Ok(()) => {
                 let dir = match open_directory_at(data, &name, "initialization directory") {
