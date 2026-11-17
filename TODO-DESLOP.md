@@ -1,12 +1,12 @@
 Prefix: DSLP
 Next: 9
 
-Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `Lock and mode continuation: the complete 19-mutant selection has 13 caught,
+Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
+
+Lock and mode continuation: the complete 19-mutant selection has 13 caught,
 four equivalent flag expressions and two unviable. Nine saved misses map to
 five caught and four equivalent; DSLP-4 remains open. See
 [filesystem evidence](docs/deslop-filesystem.md#lock-and-mode-repair-scenario).
-
-## Report` below.
 
 Directory-opening continuation: the complete 28-mutant selection has 19
 caught, seven equivalent flag expressions and two unviable. The 16 saved
@@ -26,7 +26,8 @@ Current native coverage includes the environment-isolated child profiles:
 when two fixtures cleared LLVM's path; those partial reports are superseded.
 The current filesystem reconciliation resolves 56 saved misses (38 caught,
 18 equivalent), leaving nine unresolved misses and 52 originally untested
-identities after matching six hex-digit cases and the mode return replacement. Hardware/Linux and unrelated error/race decisions remain open;
+identities after matching six hex-digit cases and the mode return replacement.
+Hardware/Linux and unrelated error/race decisions remain open;
 see [filesystem evidence](docs/deslop-filesystem.md#subprocess-coverage-collection).
 
 Ground: base `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`; macOS arm64, Rust nightly 1.102.0, `cpu-guard --cores 6`: fresh-target `make test` 15.23s, warm 4.43s, `make lint` 9.80s; all exit 0. Tests: 56 passed, two hardware authentication tests ignored. No vendored source trees found. No performance workload exists; no established user-visible performance gate. No runtime code changed.
