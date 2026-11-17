@@ -134,3 +134,33 @@ The unviable replacements need unsupported `Default` or `Zeroizing::from_iter`;
 they do not provide test evidence. No survivor or confirmed hang was reported.
 Other shards, Linux execution, remote CI and the mixed-change negative control
 remain unverified; a passing shard is not a whole-change qualification.
+
+## Hosted Linux receipts
+
+Run [44177303366](https://github.com/laputa-systems/vault/actions/runs/44177303366)
+uses candidate `0671858badb1f1fb7fea852e35bbe8929f092afe` against
+`0e72b21112b840aa5b7fa373eeeab79e63ed59bb`. Ordinary tests passed on
+macOS and both Linux musl architectures. The mutation jobs exceeded their
+Linux budget and also found survivors.
+
+Linux shard 6's uploaded outcomes file records nine caught, one unviable
+and one unresolved identity. The old gate reported zero outcomes when the
+watchdog interrupted cargo-mutants. The successor validates the partial
+file, reports the ten completed outcomes, and still fails the gate.
+`make mutants-selftest` exercises interruption with one caught mutation
+and one unresolved identity. The assertion fails on the earlier gate.
+
+Linux shard 13 observed `require_exact_name` changed from `> 1` to `< 1`.
+The CLI fixture now requires the literal surplus-argument diagnostic and
+empty stdout for all four secret commands in an isolated environment.
+`cargo test --locked --test integration
+secret_commands_reject_surplus_names_before_accessing_storage` passes.
+The exact injected comparison fails the assertion and is then restored.
+The other reported shard 13 survivor changed a union of disjoint terminal
+flag bits to XOR. Its equivalence needs a recorded platform disposition
+before the next full run.
+
+The shard 6 baseline spent 115.72 seconds on the 47 unit tests and 10.14
+seconds on its eight terminal tests. Establish a cheaper test selection
+with proof of the same critical decisions before rerunning the whole
+Linux matrix. Ordinary platform tests keep their existing coverage.
