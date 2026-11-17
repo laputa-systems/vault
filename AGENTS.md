@@ -12,11 +12,12 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
 ## Verification
 
-- Edit: `cpu-guard --cores 6 -- cargo test --bin vault <test-filter>`; cost depends on filter, unmeasured in general; check selected test count.
-- Mutation gate self-test: `cpu-guard --cores 6 -- make mutants-selftest`; requires `python3` 3.11 or newer on PATH.
-- Change: `cpu-guard --cores 6 -- make test` and `cpu-guard --cores 6 -- make lint`; macOS arm64 baseline test cold 15.23s, warm 4.43s, lint 9.80s; two hardware tests ignored.
-- Scenario: `cpu-guard --cores 6 -- make coverage` (macOS arm64 15.22s before later tests); mutation `RUST_TEST_THREADS=2 cpu-guard --cores 6 --spin 300 -- cargo mutants --baseline run --gitignore true --jobs 3 --timeout 60 --build-timeout 300 --file src/store.rs` (51 mutants, 231.22s with timeout 120 before later terminal tests).
-- Full, manual only: whole-crate mutation lists 829 mutants; 778 outside the store scope, estimated over 20 minutes. Linux musl matrix: CI `make test-ci`, cost unmeasured locally; macOS and hardware remain separate.
+- Edit: `cpu-guard --cores 2 -- cargo test --bin vault <test-filter>`; check the selected count. Use short worktree paths so Unix sockets fit macOS limits.
+- Mutation gate self-test: `cpu-guard --cores 2 -- make mutants-selftest`; requires Python 3.11 or newer.
+- Change: `RUST_TEST_THREADS=2 cpu-guard --cores 2 -- make test` and `cpu-guard --cores 2 -- make lint`; native macOS warm test median 24.24s at `6856af3` versus 6.41s before, three interleaved gated pairs. Two hardware tests are ignored. [Settings and limits](docs/deslop-filesystem.md#native-qualification-at-6856).
+- Coverage: `RUST_TEST_THREADS=2 cpu-guard --cores 2 -- make coverage`, using the shared mutation lock and a distinct target. Native Rust report: 2970/3571 lines, 361/486 branches, including inline tests; Linux and Swift are outside it.
+- Scenario mutation: one test thread, one mutant at a time, fresh baseline, separate mutation/ordinary targets and shared lock. Exact bounded selections and survivor dispositions: [filesystem evidence](docs/deslop-filesystem.md). The whole-change CI gate is unqualified for changed macOS-only functions on Linux.
+- Full mutation is manual only; the historical whole-crate listing had 829 identities, not a current completed result. Linux musl runs `make test-ci`; hardware qualification remains separate.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
 - Prompt-to-read echo ownership and prompt-failure restoration: `src/main.rs` tests `prompt_and_read_share_one_hidden_terminal_session` and `prompt_failure_restores_echo_and_reports_restore_failure`; Linux controlling-terminal behavior: `tests/terminal_cli.rs`. Exact proof and limits: `docs/deslop-terminal-echo.md`.
 - Secret set/get/list/remove, passphrases, size limits and cache: Linux `tests/terminal_cli.rs` and `src/linux.rs` tests; macOS `src/macos.rs` tests, with hardware roundtrip ignored by default.

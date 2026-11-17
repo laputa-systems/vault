@@ -576,3 +576,84 @@ Parent completion replaces computed filename/binding expectations with literal
 `44554d4d59.age` and the documented binding prefix. The same four generated
 mutants remain caught in a fresh `.work/bootstrap-parent` run, exit 0.
 The separate ordinary target again passes the full 64/28/4 suite and lint.
+
+## Native qualification at 6856
+
+On macOS arm64, source `6856af3421b82cfb7ff6bf0d5b35eede660798aa`
+passes fresh native coverage and the bounded two-core test-cost gate against
+`47dfb47ec6a1f9de2ad2d0619d5fead9bc6d8d2d`. Rust is
+`1.102.0-nightly (5b7b37aef 2026-11-08)`, LLVM 23.1.5; cargo-llvm-cov is 0.9.1.
+
+Use short isolated worktree names: `.work/wt/b` for baseline and `.work/wt/q`
+for current, both under the canonical repository. The longer initial names
+exceeded macOS socket path limits in otherwise unchanged fixtures. Moving
+them required fresh build targets: relocated artifacts retained embedded
+old source and executable paths. Both failed attempts are excluded; no
+production or fixture change was needed.
+
+From each worktree root, create `.work/tmp` and use:
+
+```sh
+export TMPDIR=$PWD/.work/tmp RUSTC_WRAPPER=kache CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=2
+export CARGO_TARGET_DIR=$PWD/.work/target-qualification-short
+cpu-guard --cores 2 -- make test
+```
+
+Warm the targets outside measurement, then alternate baseline/current three
+times. For every sample run `perf-gate-ready`, immediately time
+`/usr/bin/time -p cpu-guard --cores 2 -- make test`, then immediately run
+`perf-gate-ready -1`. All six pre/test/post exit triples are 0; the controller
+exits 0. No external service was stopped. Same two-core cap, two test threads,
+compiler, default features and test command apply to both revisions.
+
+| Revision | Wall seconds, three runs | Median | User CPU seconds |
+| --- | --- | ---: | --- |
+| Baseline | 6.40, 6.42, 6.41 | 6.41 | 6.53, 6.61, 6.69 |
+| Current | 23.18, 24.24, 24.27 | 24.24 | 38.28, 39.33, 40.24 |
+
+The 17.83-second median increase is within the 30-second allowance; it is not
+within 20%. New real cryptographic and filesystem witnesses add work, and no
+runtime speedup is claimed. Exploratory serial runs were about 8/40 seconds,
+just beyond the allowance; their controller was edited while running and
+exited 1 after its samples, so they are not the accepted timing receipt. The
+final fixed script was syntax-checked before collecting the table above.
+Mutation runs continue to use one test thread. These costs are not compared
+to older six-core/default-parallel measurements.
+
+The current ordinary and instrumented suites each pass 65 unit, 28 integration
+and four terminal tests, with two hardware ignores and zero named optional
+skips. The non-UTF-8 filename branch remains unrun on EILSEQ. Native lint
+passes with the ordinary target, exit 0.
+
+Under the shared atomic mutation lock, use a separate
+`CARGO_TARGET_DIR=$PWD/.work/target-qualification-coverage`, the environment
+above, and `cpu-guard --cores 2 -- make coverage`; exit 0. Export with
+`cargo llvm-cov report --branch --json --output-path .work/qualification/coverage.json`.
+The report covers four first-party Rust files: 2,970/3,571 lines and 361/486
+branches. It includes inline tests; it is not a production-only percentage.
+No orphan `.profraw` files remain at the worktree root. Linux and Swift are
+outside this native Rust report.
+
+Remaining production decision regions include secret-operation paths requiring
+a real hardware identity, Secure Enclave error categories, cache forwarding
+and error replies, and terminal signal setup/restoration failures. Existing
+in-memory crypto impossibility arguments and metadata guard equivalences
+remain local dispositions, not blanket coverage exemptions. Store branches
+are 20/20; macOS is 240/300, main 89/136, Secure Enclave 12/30. Signal error
+witnesses are the next bounded local slice. Cross-Mac recovery and physical
+power-loss behavior remain unverified.
+
+CI at this head passes macOS, both Linux musl suites and lint, but the mutation
+lane fails its twenty-minute budget. Its Linux job selects macOS-only changed
+functions and reports them missed while that module is not compiled; the
+51-case store phase passes (45 caught, six unviable). These Linux macOS misses
+do not overturn the native component receipts and do not qualify CI. The
+gate needs platform-aware coverage and a measured bounded recipe before
+DSLP-4 can close; neither exclusions nor a larger timeout substitute for it.
+
+Source hashes: `Cargo.lock`
+`7acf23752d82021d8945421b4ef5f3080d3718ef1bf7ef3e03b83e422ebbca67`,
+`src/macos.rs` `03869358e65e0720f143c7aca98acd446982c799bf81cb9d244eca9e6e7ae48b`,
+`src/main.rs` `c88fcde17b60fbcfbd294038308d28a922e58fc25ba6a076d908b996c8324af6`,
+`src/store.rs` `2011b7c805545c9ca93dedf2196988b0ea2322621e30ca71730bd63c5aad86ce`,
+`src/secure_enclave.rs` `6d04f2d4fd6c98b2e120c50233a3be607384d15108a5971d345bfb6bf3f0f0db`.
