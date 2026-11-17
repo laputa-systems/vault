@@ -29,7 +29,8 @@ typedef void (*handler)(int);
 static handler fault_signal(int sig, handler fn) {
     if (!active()) return signal(sig, fn);
     ++signal_calls;
-    int fail = ((mode("install") || mode("combined")) && signal_calls == 2)
+    int fail = (mode("caller-restore") && signal_calls == 1)
+        || ((mode("install") || mode("combined")) && signal_calls == 2)
         || (mode("combined") && signal_calls == 3)
         || ((mode("restore") || mode("suspend-restore")) && (signal_calls == 6 || signal_calls == 8));
     event('S', sig, fail);
