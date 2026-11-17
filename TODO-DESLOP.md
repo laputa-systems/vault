@@ -1,4 +1,4 @@
-Bootstrap domain witnesses reconcile the final three original misses as caught; hardware qualification, crash and syscall failure windows remain open. DSLP-4 remains open; see [filesystem evidence](docs/deslop-filesystem.md#bootstrap-domain-scenario).
+Bootstrap domain witnesses reconcile the final three original misses as caught; hardware qualification and broader crash and syscall failure windows remain open. DSLP-4 remains open; see [filesystem evidence](docs/deslop-filesystem.md#bootstrap-domain-scenario).
 
 Staging/listing witnesses reconcile 17 original untested identities: 15 caught and two unviable; the mutation wrapper exit was not captured. DSLP-4 remains open; see [filesystem evidence](docs/deslop-filesystem.md#staging-and-listing-scenario).
 
@@ -9,8 +9,8 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 Atomic file continuation: 31 formerly untested identities reconcile to 25
 caught, four equivalent flag expressions and two unviable; six moved guard
-mutations were injected separately. OS fault windows and other regions remain
-open. See [filesystem evidence](docs/deslop-filesystem.md#atomic-file-scenario).
+mutations were injected separately. Native atomic write fault and process-crash
+windows now have owned-child witnesses; power loss and other regions remain open. See [filesystem evidence](docs/deslop-filesystem.md#atomic-file-scenario).
 
 Lock and mode continuation: the complete 19-mutant selection has 13 caught,
 four equivalent flag expressions and two unviable. Nine saved misses map to

@@ -449,12 +449,38 @@ metadata-helper return and has two unviable name-provider-helper returns.
 Historical raw counts remain 102 caught, 65 missed, six unviable and
 59 untested; nine saved misses and 21 formerly untested identities remain.
 
-Deterministic write/fsync and rename failures after temporary creation, and
-parent-directory fsync failure after rename, were not exercised: this scope
-allows no filesystem adapter, race, privileged mount or forced filesystem
-fault. A preexisting destination directory is refused before temp creation.
-Successful writes do not establish crash durability. Other filesystem regions,
-Linux, Secure Enclave hardware and cost remain open; DSLP-4 stays open.
+Native fault-window continuation on macOS arm64, base
+`f655ec01735fc23998d05d18ad1bb070c533b30f`: test source blobs
+`src/macos.rs` `9ba3c2064f3efd65f98adc09c85777fa303756e5` and
+`tests/atomic_fault.c` `caaabcdb2d7c671f95a5f9f9636f9cf9b3586d4f`.
+The owned current-executable child loads a locally compiled DYLD interposer;
+canonical fixture descriptor checks confine failures to its data root. Child
+bootstrap, completion and per-call event markers prevent a missing child or
+interposer from passing. The uninjected control commits literal new bytes.
+Actual write, file fsync and renameatx_np failures preserve old bytes and leave
+no temp; directory fsync failure reports an error after committing new bytes.
+A write plus unlinkat failure reports both errors and retains the empty temp.
+After file fsync and after rename, an event pauses the owned child; SIGKILL,
+reap and clean retry confirm old and new states respectively, and final new
+bytes. The first kill retains its fully written temp. These are process-crash
+observations, not physical power-loss durability claims.
+
+Rustix 1.1.6's Apple backend calls fsync and weakly resolves renameatx_np and
+unlinkat; the actual events validate the ABI on this host. The focused command
+below selected one parent test and passed; temporarily skipping cleanup made
+its write case fail on the retained temp (exit 101), then was restored. No
+mutation inventory was rerun: the prior 28 identities and classifications
+remain unchanged. Hardware, cross-Mac recovery, other filesystem regions,
+Linux and cost remain open; DSLP-4 stays open. The final ordinary target
+`.work/target-atomic-fault-final` ran `cpu-guard --cores 2 -- make test`
+(exit 0: 65 unit, 28 integration, four terminal; two hardware tests ignored,
+zero optional skips) and `cpu-guard --cores 2 -- make lint` (exit 0), using
+the same environment as below. The non-UTF-8 filename case was unrun because
+this filesystem returned EILSEQ.
+
+```sh
+PATH=/Users/josh/d/stuff/.work/tools/bin:$PATH TMPDIR=$PWD/.work/tmp RUSTC_WRAPPER=kache CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 CARGO_TARGET_DIR=$PWD/.work/target-atomic-fault cpu-guard --cores 2 -- cargo test --bin vault macos::tests::atomic_file_native_fault_windows -- --exact
+```
 
 With the same environment and `CARGO_TARGET_DIR=$PWD/.work/target-atomic-final`,
 separate from mutation, `cpu-guard --cores 2 -- make test` exits 0 (56 unit,
@@ -542,7 +568,7 @@ timeout -k 5 1200 sh -c 'n=0; until mkdir /Users/josh/d/stuff/.work/tmp/mutation
 
 The three saved original misses map by site to the entry-point return, population return, and flipped verification comparison, all caught. All 65 original misses are thus reconciled: 46 caught and 19 equivalent; all 59 original untested remain reconciled as 49 caught, four equivalent and six unviable. Historical raw counts remain 102 caught, 65 missed, six unviable and 59 untested.
 
-The unrun crypto error branches are constrained by the caller and pinned age implementation: `set_secret_at` validates the name and 16 MiB limit before initialization; initialization validates UTF-8; population generates the identity and derives its recipient, encrypts into a fresh in-memory vector, then decrypts those exact bytes with that same identity. In age 0.13.0 `simple.rs`, encryption uses one recipient and a `Vec` writer; `native/x25519.rs` supplies one valid stanza with empty labels, and `protocol.rs` writes the header and payload to that vector. Under normal successful RNG and allocation, those paired keys and unmodified in-memory ciphertext exclude missing-recipient, I/O, authentication, size and UTF-8 failures in that verification. RNG failure or broken crypto implementation is not simulated. These are domain witnesses, not proof of hardware binding, real cold-store acceptance, cross-Mac recovery, injected fsync/rename failures, process-crash windows, or power-loss durability. DSLP-4 remains open.
+The unrun crypto error branches are constrained by the caller and pinned age implementation: `set_secret_at` validates the name and 16 MiB limit before initialization; initialization validates UTF-8; population generates the identity and derives its recipient, encrypts into a fresh in-memory vector, then decrypts those exact bytes with that same identity. In age 0.13.0 `simple.rs`, encryption uses one recipient and a `Vec` writer; `native/x25519.rs` supplies one valid stanza with empty labels, and `protocol.rs` writes the header and payload to that vector. Under normal successful RNG and allocation, those paired keys and unmodified in-memory ciphertext exclude missing-recipient, I/O, authentication, size and UTF-8 failures in that verification. RNG failure or broken crypto implementation is not simulated. These are domain witnesses, not proof of hardware binding, real cold-store acceptance, cross-Mac recovery, injected fsync/rename failures, process-crash windows, or power-loss durability. The later atomic file continuation above exercises injected syscall and process-crash windows without establishing power-loss durability. DSLP-4 remains open.
 
 Final ordinary verification used the same environment with `CARGO_TARGET_DIR=$PWD/.work/target-bootstrap-final`: `cpu-guard --cores 2 -- make test` and `cpu-guard --cores 2 -- make lint` each exited 0. The test run reported 64 unit passes, two hardware ignores, 28 integration passes, four terminal passes, and zero named optional skips. The non-UTF-8 filename case was unrun because the filesystem returned EILSEQ. An earlier lint run exited 2 on two needless test callback borrows; those were removed before the final mutation and ordinary runs. Cargo.lock SHA-256 `7acf23752d82021d8945421b4ef5f3080d3718ef1bf7ef3e03b83e422ebbca67`; Swift source SHA-256 `c42c7f84d1a2a894d4dbbe549740ad5edd233c4b1c5629b78c940c91d4190b43`.
 
