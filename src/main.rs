@@ -119,6 +119,10 @@ enum CliError {
         restore: Option<io::Error>,
     },
     SignalRestore(io::Error),
+    TerminalReadAndSignalRestore {
+        read: Box<CliError>,
+        restore: io::Error,
+    },
     SignalSuspend(io::Error),
     InvalidUtf8,
     Interrupted(i32),
@@ -168,6 +172,9 @@ impl fmt::Display for CliError {
             Self::SignalRestore(source) => {
                 write!(f, "vault: failed to restore signal handlers: {source}")
             }
+            Self::TerminalReadAndSignalRestore { read, restore } => {
+                write!(f, "vault: {read}; signal handler restoration also failed: {restore}")
+            }
             Self::SignalSuspend(source) => {
                 write!(f, "vault: failed to suspend for terminal job control: {source}")
             }
@@ -193,7 +200,8 @@ impl std::error::Error for CliError {
             | Self::SignalSuspend(source) => Some(source),
             Self::Wait { source, .. } => Some(source),
             Self::TerminalSettings { source, .. } => Some(source),
-            Self::TerminalReadAndRestore { read, .. } => Some(read),
+            Self::TerminalReadAndRestore { read, .. }
+            | Self::TerminalReadAndSignalRestore { read, .. } => Some(read),
             Self::TerminalReadAndPromptOutput { read, .. } => Some(read),
             Self::SignalSetup { source, .. } => Some(source),
             Self::InvalidInput(_)
@@ -297,17 +305,6 @@ fn write_stdout(bytes: &[u8]) -> Result<(), CliError> {
         .and_then(|()| stdout.flush())
         .map_err(|source| CliError::Io {
             operation: "write stdout",
-            source,
-        })
-}
-
-fn write_stderr(bytes: &[u8]) -> Result<(), CliError> {
-    let mut stderr = io::stderr().lock();
-    stderr
-        .write_all(bytes)
-        .and_then(|()| stderr.flush())
-        .map_err(|source| CliError::Io {
-            operation: "write stderr",
             source,
         })
 }
@@ -563,15 +560,16 @@ fn run_child(
 fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
     let stdin = io::stdin();
     if rustix::termios::isatty(&stdin) {
-        if !silent {
-            write_stderr(format!("Enter value for {name}: ").as_bytes())?;
-        }
+        let prompt = format!("Enter value for {name}: ");
+        let mut prompt_published = false;
         let mut signals = SignalHandlers::install()?;
         let mut terminal = TerminalFd { fd: &stdin };
         let read_result = read_without_echo(
             &mut stdin.lock(),
             &mut io::stderr().lock(),
-            silent,
+            (silent, (!silent).then_some(TerminalPrompt {
+                text: &prompt, operation: "write stderr", published: &mut prompt_published,
+            })),
             MAX_SECRET_BYTES,
             &mut terminal,
             || {
@@ -585,7 +583,10 @@ fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
         }
         let signal_restore = signals.restore();
         if let Err(source) = signal_restore {
-            return Err(CliError::SignalRestore(source));
+            return Err(match read_result {
+                Err(read) => CliError::TerminalReadAndSignalRestore { read: Box::new(read), restore: source },
+                Ok(mut value) => { value.zeroize(); CliError::SignalRestore(source) }
+            });
         }
         if PENDING_SIGNAL.load(Ordering::Relaxed) == SIG_TSTP {
             signals.suspend_and_resume()?;
@@ -661,41 +662,13 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
     })?;
     let mut signals = SignalHandlers::install()?;
     let mut terminal = TerminalFd { fd: &terminal_fd };
-    {
-        let mut prompt_session = TerminalSession::enter(&mut terminal)?;
-        let prompt_result = output
-            .write_all(prompt.as_bytes())
-            .and_then(|()| output.flush());
-        if let Err(source) = prompt_result {
-            if let Err(restore) = prompt_session.restore() {
-                let _ = signals.restore();
-                return Err(CliError::TerminalReadAndPromptOutput {
-                    read: Box::new(CliError::TerminalSettings {
-                        operation: "restore settings",
-                        source: restore,
-                        restore: None,
-                    }),
-                    output: source,
-                });
-            }
-            let _ = signals.restore();
-            return Err(CliError::Io {
-                operation: "write passphrase prompt",
-                source,
-            });
-        }
-        prompt_session
-            .restore()
-            .map_err(|source| CliError::TerminalSettings {
-                operation: "restore settings",
-                source,
-                restore: None,
-            })?;
-    }
+    let mut prompt_published = false;
     let read_result = read_without_echo(
         &mut tty,
         &mut output,
-        true,
+        (true, Some(TerminalPrompt {
+            text: prompt, operation: "write passphrase prompt", published: &mut prompt_published,
+        })),
         MAX_SECRET_BYTES,
         &mut terminal,
         || {
@@ -705,12 +678,16 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
         || signals.suspend_and_resume(),
     );
     let signal_restore = signals.restore();
-    let newline_result = output.write_all(b"\n").and_then(|()| output.flush());
+    let newline_result = if prompt_published {
+        output.write_all(b"\n").and_then(|()| output.flush())
+    } else {
+        Ok(())
+    };
     if let Err(source) = signal_restore {
-        if let Ok(mut value) = read_result {
-            value.zeroize();
-        }
-        return Err(CliError::SignalRestore(source));
+        return Err(match read_result {
+            Err(read) => CliError::TerminalReadAndSignalRestore { read: Box::new(read), restore: source },
+            Ok(mut value) => { value.zeroize(); CliError::SignalRestore(source) }
+        });
     }
     if PENDING_SIGNAL.load(Ordering::Relaxed) == SIG_TSTP {
         signals.suspend_and_resume()?;
@@ -749,10 +726,16 @@ enum TerminalRead {
     Suspended,
 }
 
+struct TerminalPrompt<'a> {
+    text: &'a str,
+    operation: &'static str,
+    published: &'a mut bool,
+}
+
 fn read_without_echo<R, W, T, I, S>(
     input: &mut R,
     feedback: &mut W,
-    silent: bool,
+    (silent, mut prompt): (bool, Option<TerminalPrompt<'_>>),
     max_bytes: usize,
     terminal: &mut T,
     mut interrupted: I,
@@ -768,14 +751,21 @@ where
     let mut value = Zeroizing::new(Vec::new());
     loop {
         let mut session = TerminalSession::enter(terminal)?;
-        let read_result = read_terminal_line(
+        let prompt_result = match prompt.take() {
+            Some(prompt) => feedback.write_all(prompt.text.as_bytes())
+                .and_then(|()| feedback.flush())
+                .map(|()| *prompt.published = true)
+                .map_err(|source| CliError::Io { operation: prompt.operation, source }),
+            None => Ok(()),
+        };
+        let read_result = prompt_result.and_then(|()| read_terminal_line(
             input,
             feedback,
             silent,
             &mut value,
             max_bytes,
             &mut interrupted,
-        );
+        ));
         let restore_result = session
             .restore()
             .map_err(|source| CliError::TerminalSettings {
@@ -1041,7 +1031,7 @@ impl Drop for SignalHandlers {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, EnvSpec, MAX_SECRET_BYTES, TerminalSettings, cmd_purge_with, parse_env_spec,
+        CliError, EnvSpec, MAX_SECRET_BYTES, TerminalPrompt, TerminalSettings, cmd_purge_with, parse_env_spec,
         parse_exec_args, read_limited_utf8, read_without_echo, run_child,
     };
     use std::io::{self, Cursor, Read, Write};
@@ -1119,6 +1109,51 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn prompt_and_read_share_one_hidden_terminal_session() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct ObservedTerminal(Rc<RefCell<Vec<&'static str>>>);
+        impl TerminalSettings for ObservedTerminal {
+            type Saved = ();
+            fn snapshot(&mut self) -> io::Result<()> { Ok(()) }
+            fn disable_echo(&mut self, _: &()) -> io::Result<()> {
+                self.0.borrow_mut().push("hide");
+                Ok(())
+            }
+            fn restore(&mut self, _: &()) -> io::Result<()> {
+                self.0.borrow_mut().push("restore");
+                Ok(())
+            }
+        }
+        struct ObservedIo(Rc<RefCell<Vec<&'static str>>>);
+        impl Write for ObservedIo {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().push("prompt");
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        impl Read for ObservedIo {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.0.borrow_mut().push("read");
+                bytes[0] = b'\n';
+                Ok(1)
+            }
+        }
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut terminal = ObservedTerminal(events.clone());
+        let mut output = ObservedIo(events.clone());
+        let mut input = ObservedIo(events.clone());
+        let mut published = false;
+        read_without_echo(&mut input, &mut output, (true, Some(TerminalPrompt {
+            text: "prompt: ", operation: "write passphrase prompt", published: &mut published,
+        })), 100, &mut terminal, || None, || Ok(())).unwrap();
+        assert!(published);
+        assert_eq!(*events.borrow(), ["hide", "prompt", "read", "restore"]);
     }
 
     struct FailingReader;
@@ -1219,7 +1254,7 @@ mod tests {
         let value = read_without_echo(
             &mut input,
             &mut feedback,
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1260,7 +1295,7 @@ mod tests {
             read_without_echo(
                 &mut input,
                 &mut Vec::new(),
-                true,
+                (true, None),
                 3,
                 &mut terminal,
                 || None,
@@ -1276,7 +1311,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"abcd\n"),
             &mut feedback,
-            false,
+            (false, None),
             3,
             &mut terminal,
             || None,
@@ -1296,7 +1331,7 @@ mod tests {
         let error = read_without_echo(
             &mut input,
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1314,7 +1349,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut get_failure,
             || None,
@@ -1329,7 +1364,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut set_failure,
             || None,
@@ -1344,7 +1379,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut restore_failure,
             || None,
@@ -1356,12 +1391,37 @@ mod tests {
     }
 
     #[test]
+    fn prompt_failure_restores_echo_and_reports_restore_failure() {
+        for restore_error in [false, true] {
+            let mut terminal = FakeTerminal::ready();
+            terminal.restore_error = restore_error;
+            let mut published = false;
+            let error = read_without_echo(
+                &mut Cursor::new(b"unused\n"),
+                &mut FailingWriter,
+                (true, Some(TerminalPrompt {
+                    text: "prompt: ", operation: "write passphrase prompt", published: &mut published,
+                })),
+                MAX_SECRET_BYTES,
+                &mut terminal,
+                || None,
+                || Ok(()),
+            ).unwrap_err();
+            assert!(!published);
+            assert!(error.to_string().contains("write passphrase prompt"));
+            assert_eq!(terminal.echo_enabled, !restore_error);
+            assert!(terminal.restores >= 1);
+            assert_eq!(matches!(error, CliError::TerminalReadAndRestore { .. }), restore_error);
+        }
+    }
+
+    #[test]
     fn terminal_read_failure_restores_echo() {
         let mut terminal = FakeTerminal::ready();
         let error = read_without_echo(
             &mut FailingReader,
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1380,7 +1440,7 @@ mod tests {
         let error = read_without_echo(
             &mut FailingReader,
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1394,7 +1454,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut FailingWriter,
-            false,
+            (false, None),
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1412,7 +1472,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            true,
+            (true, None),
             MAX_SECRET_BYTES,
             &mut terminal,
             || Some(2),
