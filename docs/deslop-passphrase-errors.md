@@ -35,4 +35,19 @@ With `CARGO_TARGET_DIR=$PWD/.work/target-passphrase-final` and `RUST_TEST_THREAD
 
 The selection does not inject failures in opening `/dev/tty`, `isatty`, descriptor cloning, prompt/newline writes, or terminal syscalls; these paths require separate controlled syscall or descriptor-failure evidence. Signal delivery during the narrow post-read suspend window and Linux execution are not qualified here. Hardware and cross-Mac recovery remain untested. Broader DSLP-4 remains open.
 
-SHA-256: `src/main.rs` `200489297c26c929ccd0afb59b9c9f0e3981ea48d3b56cbdb92075307f617d17`; `tests/terminal_cli.rs` `21e9a7f63cf78a310d5db17f7f48baf32730cb078f9059b696196b00ec3b9899`; `tests/support/controlling_tty.rs` `940aff15f80fb38dbcfbda2bc0281051da2cdb149ccbe2940ea29c72ad7a47a7`; `tests/signal_fault.c` `a50ae74d90d00aff3b198bd15c242089adb7c3ec97f159e9cdb36ac6736c219a`; `Cargo.toml` `2fe248e39075a0076270cf08899dae7dd6821b5585777524f77c472360a11bf2`; `Cargo.lock` `7acf23752d82021d8945421b4ef5f3080d3718ef1bf7ef3e03b83e422ebbca67`.
+Worker-verification SHA-256: `src/main.rs` `200489297c26c929ccd0afb59b9c9f0e3981ea48d3b56cbdb92075307f617d17`; `tests/terminal_cli.rs` `21e9a7f63cf78a310d5db17f7f48baf32730cb078f9059b696196b00ec3b9899`; `tests/support/controlling_tty.rs` `940aff15f80fb38dbcfbda2bc0281051da2cdb149ccbe2940ea29c72ad7a47a7`; `tests/signal_fault.c` `a50ae74d90d00aff3b198bd15c242089adb7c3ec97f159e9cdb36ac6736c219a`; `Cargo.toml` `2fe248e39075a0076270cf08899dae7dd6821b5585777524f77c472360a11bf2`; `Cargo.lock` `7acf23752d82021d8945421b4ef5f3080d3718ef1bf7ef3e03b83e422ebbca67`.
+
+## Current native coverage
+
+The parent integrated the caller witnesses as `c68d9cc`, replacing three busy waits with bounded five-millisecond polling. Focused caller tests and lint passed after integration. Final SHA-256 values are `32952e74602eb0206f3cdcf86760c1853a292fec0681cd2e6f1ef82a9fa50bf3` for `src/main.rs` and `f6cc2caf641056cbe23a269a64a874016cd8cab931fc7fbc9f28358005f24ba7` for `tests/support/controlling_tty.rs`.
+
+Fresh native coverage at that revision passed 68 unit, 29 integration and four terminal tests. Two hardware tests remain ignored. With the shared lock held, run the following from a short isolated worktree, using cargo-llvm-cov 0.9.1:
+
+```sh
+export TMPDIR=$PWD/.work/tmp RUSTC_WRAPPER=kache CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=2
+export CARGO_TARGET_DIR=$PWD/.work/target-qualification-coverage
+cpu-guard --cores 2 -- make coverage
+cargo llvm-cov report --branch --json --output-path .work/qualification/current-coverage.json
+```
+
+Both commands exited 0. The four-file Rust report counts 3,235/3,779 lines and 423/544 branches, including inline tests. Branch counts by file are macOS 245/300, main 146/194, Secure Enclave 12/30 and store 20/20. Added test branches change the denominator, so these figures are not a production-only coverage improvement. Linux and Swift remain outside this report. Rare descriptor/syscall failures, hardware operations and cross-Mac recovery remain unqualified. The whole-change CI platform-selection defect still prevents closing DSLP-4.

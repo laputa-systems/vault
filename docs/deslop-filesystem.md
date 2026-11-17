@@ -640,7 +640,8 @@ and error replies, and terminal signal setup/restoration failures. Existing
 in-memory crypto impossibility arguments and metadata guard equivalences
 remain local dispositions, not blanket coverage exemptions. Store branches
 are 20/20; macOS is 240/300, main 89/136, Secure Enclave 12/30. Signal error
-witnesses are the next bounded local slice. Cross-Mac recovery and physical
+witnesses at this checkpoint were pending. Later primitive and real caller
+checks are recorded in [passphrase evidence](deslop-passphrase-errors.md). Cross-Mac recovery and physical
 power-loss behavior remain unverified.
 
 CI at this head passes macOS, both Linux musl suites and lint, but the mutation
