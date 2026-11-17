@@ -16,6 +16,14 @@ see [filesystem evidence](docs/deslop-filesystem.md#private-file-admission-scena
 
 ## Report
 
+Current native coverage includes the environment-isolated child profiles:
+2,386/3,110 lines and 292/446 branches. Eight profiles were previously omitted
+when two fixtures cleared LLVM's path; those partial reports are superseded.
+The current filesystem reconciliation resolves 45 saved misses (31 caught,
+14 equivalent), leaving 20 unresolved misses and 59 originally untested
+identities. Hardware/Linux and unrelated error/race decisions remain open;
+see [filesystem evidence](docs/deslop-filesystem.md#subprocess-coverage-collection).
+
 Ground: base `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`; macOS arm64, Rust nightly 1.102.0, `cpu-guard --cores 6`: fresh-target `make test` 15.23s, warm 4.43s, `make lint` 9.80s; all exit 0. Tests: 56 passed, two hardware authentication tests ignored. No vendored source trees found. No performance workload exists; no established user-visible performance gate. No runtime code changed.
 
 PR CI builds Linux musl images and runs `make test-ci`; it has no macOS lane, so macOS and Secure Enclave tests do not run there. Its image does not install rage 0.12.1, so the Linux interoperability test returns early; keyring checks can also return early when the kernel cache is unavailable. Actual CI execution and keyring availability are unverified locally. Open fleet lint findings (linux-musl-toolchain 3, laputa-rustix 2, binary-release-static 1, make-clean-target 1, owned-tool-support 1, registry-sources 1) remain fleet-rule work.

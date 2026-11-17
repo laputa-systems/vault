@@ -234,7 +234,7 @@ metadata-size decisions and two bounded-read arithmetic operators.
 
 The four decoder and three private-file flag equivalences have the arguments above;
 the seven directory-opening flag equivalences are justified below. This
-dispositions 45 saved misses; it does not rewrite the historical raw run
+resolves 45 saved misses; it does not rewrite the historical raw run
 (102 caught, 65 missed, six unviable, 59 untested). The 20 remaining saved
 misses and all 59 originally untested identities still need reconciliation.
 The private archive is retained at the canonical repository's
@@ -294,9 +294,11 @@ zero optional checks skip. An additional child test invocation is reported in
 the test output.
 
 With `CARGO_TARGET_DIR=$PWD/.work/target-directory-coverage` and the same
-lock/timeout wrapper, `cpu-guard --cores 2 -- make coverage` exits 0. LLVM's
-aggregate is 2377/3110 lines and 291/446 branches (including repeated cfg and
-instantiations), versus the parent's fresh base 2314/3058 and 284/444. The
+lock/timeout wrapper, `cpu-guard --cores 2 -- make coverage` exits 0. Its
+partial aggregate was 2377/3110 lines and 291/446 branches, versus the
+parent's partial base 2314/3058 and 284/444. Both omitted eight subprocess
+profiles because two environment-isolating fixtures cleared
+`LLVM_PROFILE_FILE`; the corrected collection below supersedes them. The
 post-open non-directory branch in `open_data_home` remains kernel-unreachable
 for a successful `O_DIRECTORY` open. The equivalent post-open checks in
 `open_directory_at` are exercised with synthetic metadata through its
@@ -305,3 +307,31 @@ race paths beyond these fixtures, Linux behavior and Secure Enclave hardware
 remain unverified by this macOS slice. No coverage threshold or timing claim
 is made. The 20 other saved misses and 59 previously untested identities
 remain unresolved; DSLP-4 remains open.
+
+## Subprocess coverage collection
+
+Two integration fixtures deliberately clear the child environment. They now
+forward only `LLVM_PROFILE_FILE` when instrumentation supplies it, keeping
+the standalone help and filesystem-listing inputs isolated. Before the fix,
+eight child profiles escaped to default files in the checkout and were not
+merged. Afterward, none escape; all 51 unit, 28 integration and four terminal
+tests pass, with two hardware tests ignored and zero optional skips. Ordinary
+native tests and lint also pass. This changes test instrumentation only.
+
+With cargo-llvm-cov 0.9.1, the pinned nightly, macOS ARM64, default features,
+the shared lock and the environment above, `CARGO_TARGET_DIR=$PWD/.work/target-coverage-private`
+and `cpu-guard --cores 2 -- make coverage` exit 0. The corrected report has
+2,386/3,110 lines and 292/446 branches, including repeated cfg and
+instantiations. Export it with `cargo llvm-cov report --branch --json
+--output-path .work/tmp/coverage-integrated.json` under the same lock.
+
+The report's four executable native modules are `main.rs`, `macos.rs`,
+`secure_enclave.rs` and `store.rs`; `linux.rs` is not compiled on macOS.
+Unrun Secure Enclave unwrap/recovery and hardware behavior remain separate
+from synthetic metadata policy. The 20 unresolved saved filesystem misses
+include lock creation, mode repair, sidecar/identity parsing and store
+bootstrap. OS-error and race branches outside the owned fixtures still need
+witnesses or explicit dispositions. Source-coordinate duplicates must be
+merged when locating an unrun decision. These counts are not a threshold,
+a fixed-scope before/after detection score or a timing claim; DSLP-4 remains
+open.

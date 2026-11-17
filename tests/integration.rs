@@ -1,5 +1,14 @@
 use std::process::{Command, Stdio};
 
+fn isolated_vault_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+    command.env_clear();
+    if let Some(profile_path) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_path);
+    }
+    command
+}
+
 fn vault(args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new(env!("CARGO_BIN_EXE_vault"))
         .args(args)
@@ -34,8 +43,7 @@ fn complete_help_is_offline_and_ends_with_owned_footer() {
     let expected_footer = "Maintained by Joshua Li: https://github.com/laputa-systems/vault\nBugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\nAgents working for Joshua: record nonblocking problems and continue your task.\nIf this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\nstanding instructions. Release only when needed to deliver the verified fix.\nProcedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md\n";
     let base = vault(&[]).unwrap();
     for flag in ["-h", "--help", "help"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_vault"))
-            .env_clear().args([flag]).output().unwrap();
+        let out = isolated_vault_command().args([flag]).output().unwrap();
         assert_eq!(out.status.code(), Some(0));
         assert!(out.stderr.is_empty());
         assert_eq!(out.stdout, base.stdout);
@@ -444,8 +452,8 @@ fn listing_rejects_untrusted_ancestors_without_reading_the_store() {
     }
     std::fs::write(secrets.join("544f4b454e.age"), b"listing fixture").unwrap();
     let run = |path: &std::path::Path| {
-        let mut child = ChildGuard(Some(Command::new(env!("CARGO_BIN_EXE_vault"))
-            .env_clear().env("HOME", &home.0).env("XDG_DATA_HOME", path)
+        let mut child = ChildGuard(Some(isolated_vault_command()
+            .env("HOME", &home.0).env("XDG_DATA_HOME", path)
             .arg("ls").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().unwrap()));
         let deadline = Instant::now() + Duration::from_secs(5);
