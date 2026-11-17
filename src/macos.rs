@@ -1024,10 +1024,14 @@ fn set_directory_mode(dir: &File, expected: u32, label: &str) -> Result<(), Stri
 
 fn ensure_regular_file(file: &File, label: &str) -> Result<(), String> {
     let metadata = fstat(file).map_err(|source| io_error(&format!("inspect {label}"), source))?;
+    ensure_regular_metadata(&metadata, geteuid().as_raw(), label)
+}
+
+fn ensure_regular_metadata(metadata: &rustix::fs::Stat, owner: u32, label: &str) -> Result<(), String> {
     if !FileType::from_raw_mode(metadata.st_mode).is_file() {
         return Err(format!("vault: {label} is not a regular file"));
     }
-    if metadata.st_uid != geteuid().as_raw() {
+    if metadata.st_uid != owner {
         return Err(format!("vault: {label} is not owned by the current user"));
     }
     if metadata.st_nlink != 1 {
@@ -1083,11 +1087,15 @@ fn read_private_file(dir: &File, name: &str, max_size: usize) -> Result<Vec<u8>,
     ensure_regular_file(&file, name)?;
     set_file_mode(&file, PRIVATE_FILE_MODE, name)?;
     let metadata = fstat(&file).map_err(|source| io_error(&format!("inspect {name}"), source))?;
-    if metadata.st_size < 0 || metadata.st_size as u64 > max_size as u64 {
+    read_private_contents(file, metadata.st_size, name, max_size)
+}
+
+fn read_private_contents(reader: impl Read, size: i64, name: &str, max_size: usize) -> Result<Vec<u8>, String> {
+    if size < 0 || size as u64 > max_size as u64 {
         return Err(format!("vault: {name} exceeds the maximum file size"));
     }
-    let mut contents = Vec::with_capacity((metadata.st_size as usize).min(max_size));
-    file.take(max_size as u64 + 1)
+    let mut contents = Vec::with_capacity((size as usize).min(max_size));
+    reader.take(max_size as u64 + 1)
         .read_to_end(&mut contents)
         .map_err(|source| io_error(&format!("read {name}"), source))?;
     if contents.len() > max_size {
