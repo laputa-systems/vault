@@ -17,6 +17,27 @@ fn vault(args: &[&str]) -> std::io::Result<std::process::Output> {
         .output()
 }
 
+#[cfg(target_os = "macos")]
+fn bounded_filesystem_command(mut command: Command) -> std::process::Output {
+    use std::time::{Duration, Instant};
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let mut child = ChildGuard(Some(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "filesystem command exceeded its deadline");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    child.0.take().unwrap().wait_with_output().unwrap()
+}
+
 #[test]
 fn no_args_shows_usage_to_stdout() {
     let out = vault(&[]).unwrap();
@@ -428,17 +449,6 @@ fn exec_spawn_failure_is_reported_without_environment_values() {
 #[test]
 fn listing_rejects_untrusted_ancestors_without_reading_the_store() {
     use std::os::unix::fs::PermissionsExt;
-    use std::time::{Duration, Instant};
-
-    struct ChildGuard(Option<std::process::Child>);
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            if let Some(child) = &mut self.0 {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
 
     let home = CacheHome(std::env::temp_dir().join(format!("vault-fs-{}", std::process::id())));
     std::fs::create_dir(&home.0).unwrap();
@@ -452,16 +462,9 @@ fn listing_rejects_untrusted_ancestors_without_reading_the_store() {
     }
     std::fs::write(secrets.join("544f4b454e.age"), b"listing fixture").unwrap();
     let run = |path: &std::path::Path| {
-        let mut child = ChildGuard(Some(isolated_vault_command()
-            .env("HOME", &home.0).env("XDG_DATA_HOME", path)
-            .arg("ls").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap()));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-            assert!(Instant::now() < deadline, "filesystem listing exceeded its deadline");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        child.0.take().unwrap().wait_with_output().unwrap()
+        let mut command = isolated_vault_command();
+        command.env("HOME", &home.0).env("XDG_DATA_HOME", path).arg("ls");
+        bounded_filesystem_command(command)
     };
     let listed = run(&data);
     assert_eq!(listed.status.code(), Some(0));
@@ -487,4 +490,39 @@ fn listing_rejects_untrusted_ancestors_without_reading_the_store() {
     assert_eq!(restored.stdout, b"TOKEN\n");
     assert!(restored.stderr.is_empty());
     assert_eq!(std::fs::read(secrets.join("544f4b454e.age")).unwrap(), b"listing fixture");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn empty_stores_list_purge_and_lock_without_initializing() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!("ve-{}", std::process::id()));
+    std::fs::create_dir(&path).unwrap();
+    let home = CacheHome(path);
+    std::fs::set_permissions(&home.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for exists in [false, true] {
+        let data = home.0.join(if exists { "existing" } else { "absent" });
+        if exists {
+            std::fs::create_dir(&data).unwrap();
+            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for (name, expected) in [("ls", b"".as_slice()), ("lock", b"identity cache already clear\n".as_slice()), ("purge", b"nothing to purge\n".as_slice())] {
+            let mut command = isolated_vault_command();
+            command.env("HOME", &home.0).env("XDG_DATA_HOME", &data).arg(name);
+            let output = bounded_filesystem_command(command);
+            assert_eq!(output.status.code(), Some(0), "{exists} {name}: {:?}", output.stderr);
+            assert_eq!(output.stdout, expected, "{exists} {name}");
+            assert!(output.stderr.is_empty(), "{exists} {name}");
+            assert_eq!(data.exists(), exists, "{exists} {name}");
+            assert!(!data.join("vault").exists(), "{exists} {name}");
+        }
+    }
+    let data = home.0.join("x".repeat(110));
+    let mut command = isolated_vault_command();
+    command.env("HOME", &home.0).env("XDG_DATA_HOME", &data).arg("lock");
+    let output = bounded_filesystem_command(command);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"identity cache already clear\n");
+    assert!(output.stderr.is_empty());
+    assert!(!data.exists());
 }

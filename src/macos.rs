@@ -2305,6 +2305,20 @@ mod tests {
     }
 
     #[test]
+    fn new_store_rejects_empty_recovery_passphrase_before_confirmation() {
+        let test_dir = TestDir::new();
+        let mut calls = 0;
+        let error = set_secret_at(test_dir.path(), "TOKEN", b"value", |prompt| {
+            assert!(matches!(prompt, super::RecoveryPrompt::Create));
+            calls += 1;
+            Ok(SecretString::from(String::new()))
+        }).unwrap_err();
+        assert_eq!(error, "vault: recovery passphrase must not be empty");
+        assert_eq!(calls, 1);
+        assert!(!test_dir.path().join("vault").exists());
+    }
+
+    #[test]
     fn new_store_rejects_mismatched_recovery_passphrases_before_hardware() {
         let test_dir = TestDir::new();
         let mut values = ["first", "second"].into_iter();

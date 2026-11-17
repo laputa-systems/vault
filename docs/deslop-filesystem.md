@@ -657,3 +657,49 @@ Source hashes: `Cargo.lock`
 `src/main.rs` `c88fcde17b60fbcfbd294038308d28a922e58fc25ba6a076d908b996c8324af6`,
 `src/store.rs` `2011b7c805545c9ca93dedf2196988b0ea2322621e30ca71730bd63c5aad86ce`,
 `src/secure_enclave.rs` `6d04f2d4fd6c98b2e120c50233a3be607384d15108a5971d345bfb6bf3f0f0db`.
+
+## Uninitialized-store boundaries
+
+Public CLI cases now cover missing and existing application-support directories
+with no store: `ls` emits nothing, `lock` reports an already-clear identity
+cache, and `purge` reports nothing to purge. They preserve directory absence
+and never initialize a store. A too-long cache socket path also reports an
+already-clear cache without creating its directory. Owned command children
+have five-second deadlines and kill/reap guards; the same helper retains the
+untrusted-ancestor listing test's deadline. A separate `set_secret_at` witness
+requires one Create prompt and rejects an empty passphrase before confirmation
+or hardware access.
+
+The complete `list_secrets`, `purge_secrets`, `clear_identity_cache` selection
+has eight identities: seven caught, one unviable, no misses or timeouts,
+outer exit 0. The unviable return requires `CacheClearResult: Default`, which
+does not exist. Fresh baseline runs the native cache consumer and 29 integration
+cases. Return replacements and purge-count arithmetic faults fail existing
+positive consumer checks; no claim is made that the new absence case alone
+kills all seven. No exclusions were used. Reproduce under the shared atomic
+mutation lock, one job/test thread and a distinct mutation target:
+
+```sh
+timeout -k 5 1200 cpu-guard --cores 2 -- cargo mutants --in-place --no-config --skip-calls-defaults=false -f src/macos.rs -F '(list_secrets|purge_secrets|clear_identity_cache)([^_a-z]|$)' -p vault --test-package vault --timeout 60 --build-timeout 300 --output .work/empty-mutants -- --test cache_spawn --test integration
+```
+
+The regexp covers return and expression mutations; an initial end-anchored
+function-name regexp selected only two arithmetic identities and was rejected
+before running mutations. The eight-name inventory is the accepted scope.
+
+Two restored hand faults prove the new boundaries. Returning an error for
+`list_secrets` when the support directory is missing makes the new CLI test
+fail at exit code 1 versus 0. Reversing the empty-passphrase predicate makes
+the new unit test fail because it observes Confirm instead of Create. Each
+focused Cargo command exits 101; production source is restored afterward.
+
+With a separate ordinary target and the environment in native qualification,
+`make test` and `make lint` pass: 67 unit, 29 integration and four terminal
+cases; two hardware ignores, zero named optional skips, non-UTF-8 filename
+unrun on EILSEQ. A warm full-suite observation with passing pre/test/post
+gates is 24.47s, within the 30s increase allowance against the earlier 6.41s
+baseline. This is a cost check, not a speedup. Source hashes:
+`src/macos.rs` `2458af8557faf1ea051c5f0a101a354a65e722dd92fbb55b5e02d7bb4da6a3c1`,
+`tests/integration.rs` `841ffc6ad5109f399ef9b767113dfed518917c8ab0f8b3bb87e7218017b2f581`.
+The shared environment, pinned tools and separate target requirements above
+apply; no production API changed and broader DSLP-4 remains open.
