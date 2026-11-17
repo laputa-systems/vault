@@ -444,8 +444,9 @@ restored manual injections); temporary creation's four AND flag mutations
 are caught, four XOR expressions equivalent, and two wrapper return mutations
 unviable; cleanup's two returns, filename's seven expressions and name
 generator's two returns are caught. Thus 25 caught, four equivalent and two
-unviable reconcile this slice. The extra helper return mutations are separately
-unviable. Historical raw counts remain 102 caught, 65 missed, six unviable and
+unviable reconcile this slice. The generated scope additionally catches the
+metadata-helper return and has two unviable name-provider-helper returns.
+Historical raw counts remain 102 caught, 65 missed, six unviable and
 59 untested; nine saved misses and 21 formerly untested identities remain.
 
 Deterministic write/fsync and rename failures after temporary creation, and
