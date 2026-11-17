@@ -115,6 +115,14 @@ and lint pass in a separate target. The original 232-case run remains
 incomplete with its original counts, and unrelated regions, coverage and cost
 remain open. See [the filesystem record](docs/deslop-filesystem.md).
 
+Prompt confidentiality finding PR34 merged as `6a4b7d5`. One terminal session
+now spans prompt publication and input; the deterministic operation-order
+witness fails on the base sequence and passes after. Native macOS and Linux
+ARM64 checks pass for the finding. The combined Tests tree retains its prior
+restore-failure oracle and passes native tests/lint in a separate target;
+broader DSLP-4 acceptance remains open. See the
+[finding proof and limits](docs/deslop-terminal-echo.md).
+
 ## Tickets
 
 
