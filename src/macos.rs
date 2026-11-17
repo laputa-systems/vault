@@ -1710,14 +1710,27 @@ mod tests {
         let test_dir = TestDir::new();
         let socket = test_dir.path().join("cache.sock");
         let recipient = age::x25519::Identity::generate().to_public();
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        drop(listener);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("macos::tests::create_stale_cache_socket")
+            .env("VAULT_TEST_STALE_CACHE_SOCKET", &socket)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(socket.exists());
         assert!(fetch_cached_identity(&socket, &recipient).unwrap().is_none());
         assert!(!socket.exists());
         assert!(matches!(
             clear_identity_cache_at(&socket).unwrap(),
             CacheClearResult::AlreadyClear
         ));
+    }
+
+    #[test]
+    fn create_stale_cache_socket() {
+        if let Some(socket) = std::env::var_os("VAULT_TEST_STALE_CACHE_SOCKET") {
+            let _listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        }
     }
 
     #[test]
