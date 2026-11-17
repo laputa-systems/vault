@@ -112,7 +112,10 @@ arithmetic overflow. Four misses are equivalent for the observable result:
   validation (or UTF-8/hex decoding first).
 - At 1160:32, `|` to `^` combines nonoverlapping high and low four-bit nibbles.
 - At 1163:44, `||` to `&&` still returns `None` for an invalid name because
-  `secret_filename` repeats the same validation and its `ok()?` exits.
+  `secret_filename` repeats the same validation and its `ok()?` exits. Valid
+  names already came from an even-length, lowercase-hex stem and valid UTF-8,
+  so their encoding is canonical. The earlier length guard rejects `414.age`
+  before this comparison; an additional literal case verifies that dependency.
 
 No exclusions were added. The first baseline exited 4 before any mutant: two
 cache integration tests rejected the overly long fixture socket path. After
@@ -129,3 +132,12 @@ both pass. The suite reports 44 unit, 28 integration and four terminal tests
 passed, two hardware tests ignored and zero optional skips. An initial test
 wrapper lost its exit status to zsh's readonly `status` variable despite green
 output; the command was rerun successfully.
+
+Parent review checked every caught log against the codec oracle, then repeated
+all 36 identities with the additional odd-stem case and a fresh baseline,
+selecting the codec unit test through `--cargo-test-arg=--bin
+--cargo-test-arg=vault
+--cargo-test-arg=macos::tests::secret_name_filename_encoding_is_canonical_and_path_safe`.
+The result remains 31 caught, four equivalent misses, one unviable and no
+timeouts; raw tool exit 2 remains visible. This omits unrelated cache waits from
+the mutation runner. Full ordinary verification still runs the entire suite.

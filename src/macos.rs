@@ -1441,7 +1441,7 @@ mod tests {
             assert_eq!(secret_filename(name).unwrap(), filename, "encode {name:?}");
             assert_eq!(decode_secret_filename(filename).as_deref(), Some(name), "decode {filename:?}");
         }
-        for filename in [".age", "0.age", "00.age", "ff.age", "c3.age", "gg.age", "4G.age", "4f.AGE", "4f.agex", "4F.age", "4f", "4f.age.age"] {
+        for filename in [".age", "0.age", "414.age", "00.age", "ff.age", "c3.age", "gg.age", "4G.age", "4f.AGE", "4f.agex", "4F.age", "4f", "4f.age.age"] {
             assert_eq!(decode_secret_filename(filename), None, "reject {filename:?}");
         }
         for name in ["", "a\0b"] {
