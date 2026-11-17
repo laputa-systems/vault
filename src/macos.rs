@@ -790,10 +790,20 @@ fn initialize_store(
     value: &[u8],
     passphrase: SecretString,
 ) -> Result<(), String> {
+    initialize_store_with(data, name, value, passphrase, wrap_identity)
+}
+
+fn initialize_store_with(
+    data: &File,
+    name: &str,
+    value: &[u8],
+    passphrase: SecretString,
+    wrap: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, SecureEnclaveError>,
+) -> Result<(), String> {
     let (stage_name, stage) = create_staging_directory(data)?;
     let value = std::str::from_utf8(value)
         .map_err(|_| "vault: secret is not valid UTF-8".to_owned())?;
-    let result = populate_staging_directory(&stage, name, value, passphrase);
+    let result = populate_staging_directory(&stage, name, value, passphrase, wrap);
     if let Err(primary) = result {
         drop(stage);
         return Err(cleanup_failure(data, &stage_name, primary));
@@ -816,6 +826,7 @@ fn populate_staging_directory(
     name: &str,
     value: &str,
     passphrase: SecretString,
+    wrap: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, SecureEnclaveError>,
 ) -> Result<(), String> {
     let identity = age::x25519::Identity::generate();
     let private_key = identity.to_string();
@@ -828,7 +839,7 @@ fn populate_staging_directory(
     let recipient = identity.to_public();
     let recipient_text = format!("{recipient}\n");
     atomic_write(stage, RECIPIENT_NAME, recipient_text.as_bytes())?;
-    let sidecar = wrap_identity(&private_key_bytes, &identity_binding(&recipient))
+    let sidecar = wrap(&private_key_bytes, &identity_binding(&recipient))
         .map_err(format_secure_enclave_error)?;
     atomic_write(stage, SECURE_ENCLAVE_NAME, &sidecar)?;
 
