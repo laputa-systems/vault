@@ -1,5 +1,17 @@
 # Passphrase cleanup boundary
 
+Parent acceptance replaces busy-yield polling with five-millisecond backoff;
+entry, prompt, completion and deadline checks still determine every outcome.
+The focused five-case scenario and native lint pass again, exit 0. The shared
+launcher's dead-code suppression names its actual constraint: the macOS
+terminal integration harness compiles the shared file but only uses PTY
+allocation, while the unit harness and Linux integration use its launcher.
+Final hashes after these test-only changes are `src/main.rs`
+`32952e74602eb0206f3cdcf86760c1853a292fec0681cd2e6f1ef82a9fa50bf3`
+and `tests/support/controlling_tty.rs`
+`f6cc2caf641056cbe23a269a64a874016cd8cab931fc7fbc9f28358005f24ba7`.
+The production function and mutation assertions are unchanged.
+
 On macOS arm64 27.2 (26B123), base `370ebe83817ce2dda5fb681569400c65964ad584`, helper commit `47993a2849c08d7415098acd0ba151f18c153dae` and witness commit `df04b9b9034f87899592c1dffd373613160eb482`, the unit test `tests::read_passphrase_owned_terminal_cleanup` invokes the private `read_passphrase` in an owned current-test-executable child. It cannot proceed to storage on success. Input is only empty newline or invalid UTF-8. The parent requires the literal prompt and hidden echo before input, and checks input, output, control and local flags after the child reports completion. As in the existing terminal tests, the macOS `PENDIN` transient state bit is excluded from the local-mode comparison. Parent-owned PTY and child guards close the master before reaping; this is required for macOS session teardown. Compiler and child waits have deadlines. LLVM_PROFILE_FILE is inherited.
 
 Unarmed empty and invalid controls use real OS signals and respectively assert an empty secret and `InvalidUtf8`. The armed trace control also calls real signals and asserts `S18 S15 S3 S2 S1` in order. The `caller-restore` interposer is inactive until the parent arms its private marker after the prompt; it fails the first subsequent signal restoration with EIO. Empty input yields `SignalRestore(EIO)`; invalid input yields `TerminalReadAndSignalRestore(InvalidUtf8, EIO)`. Both assert entry and completion markers and the exact event sequence `S18! S15 S3 S2 S1 S18`, including the successful drop retry. No hardware, backend or user store is accessed by this child.

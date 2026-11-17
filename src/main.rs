@@ -1104,7 +1104,7 @@ mod tests {
             loop {
                 if let Some(status) = child.0.try_wait().unwrap() { child.1 = true; return status; }
                 assert!(Instant::now() < deadline, "owned child deadline");
-                std::thread::yield_now();
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
         let path = std::env::temp_dir().join(format!("passphrase-{}", std::process::id()));
@@ -1143,7 +1143,7 @@ mod tests {
                 if output.windows(b"owned prompt: ".len()).any(|w| w == b"owned prompt: ") && hidden { break; }
                 assert!(child.0.try_wait().unwrap().is_none(), "{case}: child exited before prompt: {output:?}");
                 assert!(Instant::now() < deadline, "{case}: prompt deadline: {output:?}");
-                std::thread::yield_now();
+                std::thread::sleep(Duration::from_millis(5));
             }
             assert_eq!(fs::read(root.join("entered")).unwrap(), b"yes");
             if case.ends_with("fault") || case == "empty-trace" { fs::write(root.join("armed"), b"yes").unwrap(); }
@@ -1152,7 +1152,7 @@ mod tests {
             while !root.join("complete").exists() && !root.join("failed").exists() {
                 assert!(child.0.try_wait().unwrap().is_none(), "{case}: child exited before completion");
                 assert!(Instant::now() < deadline, "{case}: completion deadline");
-                std::thread::yield_now();
+                std::thread::sleep(Duration::from_millis(5));
             }
             let after = tcgetattr(&slave).unwrap();
             assert_eq!(after.input_modes, before.input_modes);

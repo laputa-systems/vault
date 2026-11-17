@@ -18,7 +18,7 @@ pub fn open_pty() -> io::Result<(File, File)> {
     Ok((master, slave))
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, reason = "macOS terminal_cli compiles this shared module but only uses PTY allocation")]
 pub fn launch_binary_with_controlling_tty(
     executable: &std::ffi::OsStr, slave: &File, data_home: &std::path::Path,
     args: &[&str], environment: &[(&str, &str)], stdin: Stdio,
