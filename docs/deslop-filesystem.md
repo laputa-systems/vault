@@ -229,14 +229,79 @@ metadata-size decisions and two bounded-read arithmetic operators.
 | Directory policy | 7 | 0 | 0 |
 | Filename decoder | 4 | 4 | 0 |
 | Private-file admission/read | 11 | 3 | 0 |
-| Other regions | 0 | 0 | 36 |
+| Directory opening | 9 | 7 | 0 |
+| Other regions | 0 | 0 | 20 |
 
-The four decoder and three flag equivalences have the arguments above. This
-dispositions 29 saved misses; it does not rewrite the historical raw run
-(102 caught, 65 missed, six unviable, 59 untested). The 36 remaining saved
+The four decoder and three private-file flag equivalences have the arguments above;
+the seven directory-opening flag equivalences are justified below. This
+dispositions 45 saved misses; it does not rewrite the historical raw run
+(102 caught, 65 missed, six unviable, 59 untested). The 20 remaining saved
 misses and all 59 originally untested identities still need reconciliation.
 The private archive is retained at the canonical repository's
 `.git/preserved-checkouts/d-overlap-20261116T185745-linear/`; its receipt
 locates the original `mutants-macos-filesystem-final` inventory and outcomes.
-Reproduce current qualification with the three complete Scenario commands
-above, rather than restarting the stopped integration-filtering driver.
+Reproduce current qualification with the complete Scenario commands, rather
+than restarting the stopped integration-filtering driver.
+
+## Directory opening Scenario
+
+On macOS arm64, base `a447af3875897205f3ec84c0ecc93158dec64529`,
+the owned `directory_open_policy_and_descriptors` fixture checks missing lookup
+and nested creation, descriptor identity and close-on-exec, relative, parent and
+root paths, symlinks, regular files, unsafe parent and final modes, and the
+trusted-parent wrapper. A read-only open of root-owned `/Users` as the final
+component proves the final ownership check; no contents are read. The
+production-used metadata helper preserves the open, fstat, type and owner
+ordering and tests foreign ownership using synthetic metadata. O_DIRECTORY
+prevents ordinary non-directory descriptors reaching the post-open type checks;
+the helper additionally tests the type check directly. No chown or real user
+data is involved.
+
+Cargo-mutants 27.1.0 generated 28 return and expression mutants in
+`open_data_home`, `open_directory_at`, `ensure_trusted_parent`, and
+`ensure_opened_directory_metadata`. A fresh baseline selected one owning test.
+The final run exited 2 with 19 caught, seven missed, two unviable and no
+timeouts. All caught and survivor logs were inspected. The seven survivors are
+four XOR flag substitutions in `open_data_home` and three in `open_directory_at`:
+macOS RDONLY is zero, and DIRECTORY, NOFOLLOW, NONBLOCK and CLOEXEC are disjoint
+bits, so each substituted expression produces identical flags. This is
+functional flag equivalence only, not a timing or memory claim. The two
+unviable return replacements require `File: Default`. The index `+` to `-`
+mutant panics on unsigned underflow; `+` to `*` fails the `/Users` final-owner
+assertion. All 16 original misses map by function and expression: nine caught
+(two data-home flag ANDs, two create guards, index multiplication, trusted
+parent return, and three directory-at flag ANDs), seven equivalent XORs.
+No exclusions were added. The initial complete run had 17 caught, nine missed
+and two unviable; its two additional AND survivors motivated exact ENOTDIR
+assertions and it is superseded.
+
+With `PATH=/Users/josh/d/stuff/.work/tools/bin:$PATH`, `TMPDIR=$PWD/.work/tmp`,
+`RUSTC_WRAPPER=kache`, `CARGO_BUILD_JOBS=1`, `RUST_TEST_THREADS=1`, and
+`CARGO_TARGET_DIR=$PWD/.work/target-directory-mutants`, the lock-protected run was:
+
+```sh
+timeout -k 5 1200 sh -c 'n=0; until mkdir /Users/josh/d/stuff/.work/tmp/mutation.lock 2>/dev/null; do n=$((n+1)); [ "$n" -lt 150 ] || exit 73; sleep 2; done; trap "rmdir /Users/josh/d/stuff/.work/tmp/mutation.lock" EXIT HUP INT TERM; cpu-guard --cores 2 -- cargo mutants --gitignore true --file src/macos.rs --re "(in (open_data_home|open_directory_at|ensure_trusted_parent|ensure_opened_directory_metadata)|replace (open_data_home|open_directory_at|ensure_trusted_parent|ensure_opened_directory_metadata) ->)" --baseline run --timeout 60 --build-timeout 300 --jobs 1 --no-shuffle --output .work/directory-mutants-final --cargo-test-arg=--bin --cargo-test-arg=vault --cargo-test-arg=macos::tests::directory_open'
+```
+
+A hand fault replacing the create guard with `true` made the owning test fail
+on the missing read-only lookup (exit 101); restoring the source made the
+same test pass (exit 0). Mutation also confirms the final-index fault fails
+the intended root-owned-final assertion. With the same environment and
+`CARGO_TARGET_DIR=$PWD/.work/target-directory-final`, `cpu-guard --cores 2 --
+make test` and `cpu-guard --cores 2 -- make lint` exit 0: 51 unit, 28
+integration and four terminal tests pass, two hardware tests are ignored, and
+zero optional checks skip. An additional child test invocation is reported in
+the test output.
+
+With `CARGO_TARGET_DIR=$PWD/.work/target-directory-coverage` and the same
+lock/timeout wrapper, `cpu-guard --cores 2 -- make coverage` exits 0. LLVM's
+aggregate is 2377/3110 lines and 291/446 branches (including repeated cfg and
+instantiations), versus the parent's fresh base 2314/3058 and 284/444. The
+post-open non-directory branch in `open_data_home` remains kernel-unreachable
+for a successful `O_DIRECTORY` open. The equivalent post-open checks in
+`open_directory_at` are exercised with synthetic metadata through its
+production helper; kernel refusal remains separately witnessed. Error and
+race paths beyond these fixtures, Linux behavior and Secure Enclave hardware
+remain unverified by this macOS slice. No coverage threshold or timing claim
+is made. The 20 other saved misses and 59 previously untested identities
+remain unresolved; DSLP-4 remains open.

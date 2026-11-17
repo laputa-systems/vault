@@ -1430,6 +1430,58 @@ mod tests {
     }
 
     #[test]
+    fn directory_open_policy_and_descriptors() {
+        use std::os::unix::fs::MetadataExt;
+        use std::path::Path;
+        let fixture = TestDir::new();
+        let parent = fixture.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        let nested = parent.join("missing").join("leaf");
+        assert!(open_data_home(&nested, false).unwrap().is_none());
+        assert!(!parent.join("missing").exists());
+        let opened = open_data_home(&nested, true).unwrap().unwrap();
+        let actual = opened.metadata().unwrap();
+        let expected = fs::metadata(&nested).unwrap();
+        assert!(actual.is_dir());
+        assert_eq!((actual.dev(), actual.ino()), (expected.dev(), expected.ino()));
+        assert!(rustix::io::fcntl_getfd(&opened).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        let again = open_data_home(&nested, false).unwrap().unwrap();
+        assert_eq!(again.metadata().unwrap().ino(), expected.ino());
+        assert_eq!(open_data_home(Path::new("relative"), false).unwrap_err(), "vault: application support directory must be absolute");
+        assert_eq!(open_data_home(&parent.join("../other"), false).unwrap_err(), "vault: application support path contains an unsafe component");
+        assert_eq!(open_data_home(Path::new("/"), false).unwrap_err(), "vault: application support directory cannot be the filesystem root");
+        if rustix::process::geteuid().as_raw() != 0 {
+            assert_eq!(open_data_home(Path::new("/Users"), false).unwrap_err(), "vault: application support directory is not owned by the current user");
+        }
+        let parent_fd = fs::File::open(&parent).unwrap();
+        assert_eq!(super::ensure_trusted_parent(&parent_fd, "fixture"), Ok(()));
+        let child = super::open_directory_at(&parent_fd, "missing", "fixture").unwrap();
+        let child_metadata = child.metadata().unwrap();
+        let expected_child = fs::metadata(parent.join("missing")).unwrap();
+        assert!(child_metadata.is_dir());
+        assert_eq!((child_metadata.dev(), child_metadata.ino()), (expected_child.dev(), expected_child.ino()));
+        assert!(rustix::io::fcntl_getfd(&child).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        let mut metadata = rustix::fs::fstat(&child).unwrap();
+        assert_eq!(super::ensure_opened_directory_metadata(&metadata, "fixture"), Ok(()));
+        metadata.st_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
+        assert_eq!(super::ensure_opened_directory_metadata(&metadata, "fixture").unwrap_err(), "vault: fixture is not owned by the current user");
+        fs::write(parent.join("file"), b"fixture").unwrap();
+        assert_eq!(open_data_home(&parent.join("file"), false).unwrap_err(), io_error("open application support directory", rustix::io::Errno::NOTDIR));
+        assert_eq!(super::open_directory_at(&parent_fd, "file", "fixture").unwrap_err(), io_error("open fixture", rustix::io::Errno::NOTDIR));
+        let file_metadata = rustix::fs::stat(parent.join("file")).unwrap();
+        assert_eq!(super::ensure_opened_directory_metadata(&file_metadata, "fixture").unwrap_err(), "vault: fixture is not a directory");
+        std::os::unix::fs::symlink("missing", parent.join("link")).unwrap();
+        assert!(open_data_home(&parent.join("link"), false).is_err());
+        assert!(super::open_directory_at(&parent_fd, "link", "fixture").is_err());
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(super::ensure_trusted_parent(&parent_fd, "fixture").unwrap_err(), "vault: fixture is writable by other users");
+        assert_eq!(open_data_home(&nested, false).unwrap_err(), "vault: application support parent is writable by other users");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(open_data_home(&nested, false).unwrap_err(), "vault: application support directory is writable by other users");
+    }
+
+    #[test]
     fn private_file_reads_and_repairs_owned_files() {
         let fixture = TestDir::new();
         let dir = fs::File::open(fixture.path()).unwrap();

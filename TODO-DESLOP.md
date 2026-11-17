@@ -3,6 +3,11 @@ Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
+Directory-opening continuation: the complete 28-mutant selection has 19
+caught, seven equivalent flag expressions and two unviable. The 16 saved
+misses map to nine caught and seven equivalent; DSLP-4 remains open. See
+[filesystem evidence](docs/deslop-filesystem.md#directory-opening-scenario).
+
 Private-file continuation: owned fixture and synthetic metadata witnesses cover
 admission, mode repair and post-metadata growth; the complete 34-mutant slice
 has 30 caught, three equivalent flag expressions and one unviable. Full native
