@@ -2054,7 +2054,7 @@ mod tests {
             let recipient = fs::read_to_string(stage.join(super::RECIPIENT_NAME)).unwrap();
             assert_eq!(recipient, format!("{}\n", identity.to_public()));
             assert_eq!(key, identity.to_string().expose_secret().as_bytes());
-            assert_eq!(binding, super::identity_binding(&identity.to_public()));
+            assert_eq!(binding, format!("dev.joshuarli.vault\0age-x25519\0{}", identity.to_public()).as_bytes());
             assert!(!stage.join(super::SECURE_ENCLAVE_NAME).exists());
             assert!(!stage.join(super::SECRETS_NAME).exists());
             Ok(framed_sidecar())
@@ -2062,7 +2062,7 @@ mod tests {
         super::initialize_store_with(&data, "DUMMY", b"literal disposable value", passphrase(), wrap).unwrap();
         let root = fixture.path().join(STORE_NAME);
         let secrets = root.join(super::SECRETS_NAME);
-        let secret = secrets.join(secret_filename("DUMMY").unwrap());
+        let secret = secrets.join("44554d4d59.age");
         let paths = [root.clone(), secrets.clone(), root.join(super::IDENTITY_NAME), root.join(super::RECIPIENT_NAME), root.join(SECURE_ENCLAVE_NAME), secret.clone()];
         for (index, path) in paths.iter().enumerate() {
             let metadata = fs::metadata(path).unwrap();
@@ -2073,7 +2073,7 @@ mod tests {
         names.sort();
         assert_eq!(names, ["identity.age", "identity.se", "recipient", "secrets"].map(OsString::from));
         let names: Vec<_> = fs::read_dir(&secrets).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names, [OsString::from(secret_filename("DUMMY").unwrap())]);
+        assert_eq!(names, [OsString::from("44554d4d59.age")]);
         let recovery = fs::read(root.join(super::IDENTITY_NAME)).unwrap();
         let ciphertext = fs::read(&secret).unwrap();
         assert!(recovery.starts_with(b"age-encryption.org/v1\n"));
