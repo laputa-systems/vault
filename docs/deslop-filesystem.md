@@ -172,9 +172,10 @@ empty, missing and oversized files, symlink, hard link, directory and FIFO
 refusals, and repair from 0666 to 0600. An owned file's synthetic `Stat`
 checks foreign-owner refusal. Production-used metadata and bounded-reader
 helpers allow deterministic witnesses for a stream growing or shrinking after
-metadata inspection, preserving the original syscall order, preallocation,
+metadata inspection, preserving the original file-operation order, preallocation,
 flags, read limit and errors. The FIFO check uses a deadline and reaps its
-child if opening blocks. No timing or memory equivalence is claimed.
+child if opening blocks, including during unwinding. No timing or memory
+equivalence is claimed.
 
 Removing the post-read size check made the growth assertion fail with four
 bytes returned; replacing chmod's target with 0666 made the repair assertion
@@ -187,7 +188,9 @@ Cargo-mutants 27.1.0 generated 34 return and expression mutants across
 `ensure_regular_file`, `ensure_regular_metadata`, `set_file_mode`,
 `read_private_file`, and `read_private_contents`. The fresh baseline ran four
 owning tests. The final run exited 2: 30 caught, three missed, one unviable,
-zero timeouts or untested. All caught logs were inspected and failed the new
+zero timeouts or untested. Parent verification after adding unwind cleanup
+repeated all 34 with the same classes in `.work/private-mutants-parent`.
+All caught logs were inspected and failed the new
 assertions, including the FIFO deadline. The three misses replace `|` by `^`
 in the open flags: on this macOS target `RDONLY` is zero and `NOFOLLOW`,
 `CLOEXEC`, and `NONBLOCK` have disjoint bits, so all three produce the same
@@ -211,3 +214,29 @@ ignored, and zero optional skips. The original stopped 232-case run remains
 102 caught, 65 missed, six unviable and 59 untested; filename and data-home
 results are unchanged. Other regions, coverage and platform evidence remain
 open; DSLP-4 remains open.
+
+## Reconciliation with the stopped run
+
+The saved 65 misses were matched against current outcomes by mutation site,
+operator and function, following the unchanged expressions into the two
+extracted private-file helpers. The filename names match exactly, including
+their original locations. The private-file sites are the two admission/mode
+return replacements, six open-flag operators, missing-file comparison, three
+metadata-size decisions and two bounded-read arithmetic operators.
+
+| Original missed region | Now caught | Equivalent | Still unresolved |
+| --- | ---: | ---: | ---: |
+| Directory policy | 7 | 0 | 0 |
+| Filename decoder | 4 | 4 | 0 |
+| Private-file admission/read | 11 | 3 | 0 |
+| Other regions | 0 | 0 | 36 |
+
+The four decoder and three flag equivalences have the arguments above. This
+dispositions 29 saved misses; it does not rewrite the historical raw run
+(102 caught, 65 missed, six unviable, 59 untested). The 36 remaining saved
+misses and all 59 originally untested identities still need reconciliation.
+The private archive is retained at the canonical repository's
+`.git/preserved-checkouts/d-overlap-20261116T185745-linear/`; its receipt
+locates the original `mutants-macos-filesystem-final` inventory and outcomes.
+Reproduce current qualification with the three complete Scenario commands
+above, rather than restarting the stopped integration-filtering driver.

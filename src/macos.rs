@@ -1464,19 +1464,24 @@ mod tests {
         }
         let fixture = TestDir::new();
         assert!(std::process::Command::new("/usr/bin/mkfifo").arg(fixture.path().join("fifo")).status().unwrap().success());
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = ChildGuard(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "macos::tests::private_file_fifo_is_rejected_without_waiting_for_a_writer"])
             .env(CHILD_DIR, fixture.path())
-            .spawn().unwrap();
+            .spawn().unwrap());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if let Some(status) = child.try_wait().unwrap() {
+            if let Some(status) = child.0.try_wait().unwrap() {
                 assert!(status.success(), "FIFO reader failed: {status}");
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
                 panic!("FIFO reader did not return without a writer");
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
