@@ -1016,13 +1016,19 @@ fn ensure_opened_directory_metadata(metadata: &rustix::fs::Stat, label: &str) ->
 
 fn set_directory_mode(dir: &File, expected: u32, label: &str) -> Result<(), String> {
     let before = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
-    if !FileType::from_raw_mode(before.st_mode).is_dir() || before.st_uid != geteuid().as_raw() {
-        return Err(format!("vault: {label} is not an owned directory"));
-    }
+    ensure_owned_directory_metadata(&before, label)?;
     fchmod(dir, mode(expected)).map_err(|source| io_error(&format!("set permissions on {label}"), source))?;
     let metadata = fstat(dir).map_err(|source| io_error(&format!("inspect {label}"), source))?;
     if u32::from(metadata.st_mode & 0o7777) != expected {
         return Err(format!("vault: {label} permissions must be {expected:04o}"));
+    }
+    Ok(())
+}
+
+
+fn ensure_owned_directory_metadata(metadata: &rustix::fs::Stat, label: &str) -> Result<(), String> {
+    if !FileType::from_raw_mode(metadata.st_mode).is_dir() || metadata.st_uid != geteuid().as_raw() {
+        return Err(format!("vault: {label} is not an owned directory"));
     }
     Ok(())
 }
