@@ -44,7 +44,10 @@ def classify(path, status, config):
 
 
 def scope_for(classes, config):
-    triggers = {'tests', 'fixtures', 'build configuration', 'gate', 'unclassified'}
+    unknown = sorted(path for path, kind in classes.items() if kind == 'unclassified')
+    if unknown:
+        raise GateError('unclassified paths: ' + ', '.join(unknown))
+    triggers = {'tests', 'fixtures', 'build configuration', 'gate', 'deleted production'}
     return set(config['scope']) if any(kind in triggers for kind in classes.values()) else set()
 
 
@@ -214,7 +217,7 @@ def main():
             args = ['--in-diff', str(path)]
             phases.append(('diff ' + ', '.join(in_diff), args, listing(args)))
         selected = [n for _, _, names in phases for n in names]
-        relevant = any(k not in {'irrelevant', 'deleted production'} for k in classes.values())
+        relevant = any(k != 'irrelevant' for k in classes.values())
         selected_or_fail(relevant, selected)
         if not relevant:
             print('irrelevant change: no mutants selected', flush=True)

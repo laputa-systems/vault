@@ -35,6 +35,13 @@ class SelectionTests(unittest.TestCase):
     def test_irrelevant_does_not_select_scope(self):
         self.assertEqual(scope_for({'README.md': classify('README.md', 'M', CONFIG)}, CONFIG), set())
 
+    def test_deleted_production_selects_critical_scope(self):
+        self.assertEqual(scope_for({'src/old.rs': 'deleted production'}, CONFIG), {'src/main.rs'})
+
+    def test_unknown_path_fails_closed(self):
+        with self.assertRaisesRegex(GateError, 'unclassified paths: unknown'):
+            scope_for({'unknown': 'unclassified'}, CONFIG)
+
     def test_rename(self):
         self.assertEqual(parse_changes('R100\0src/old.rs\0src/new.rs\0'),
                          {'src/old.rs': 'D', 'src/new.rs': 'A'})
