@@ -381,8 +381,8 @@ The nine original misses in this region match five caught and four equivalent
 mutants, including the extracted admission expression. The original untested
 `mode` return replacement matches the unviable case. No exclusion was added;
 raw historical counts remain 102 caught, 65 missed, six unviable and 59
-untested. The current corrected native coverage remains 2386/3110 lines and
-292/446 branches; this slice did not rerun coverage. Other regions, Linux,
+untested. Parent integration reran corrected native coverage: 2454/3173 lines
+and 295/446 branches, with no escaped child profiles. Other regions, Linux,
 hardware and cost remain open, and DSLP-4 remains open.
 
 With the same environment and `CARGO_TARGET_DIR=$PWD/.work/target-lock-final`,
@@ -390,3 +390,11 @@ With the same environment and `CARGO_TARGET_DIR=$PWD/.work/target-lock-final`,
 both exit 0. The suite reports 53 unit, 28 integration and four terminal tests
 passed, two hardware tests ignored, zero optional skips, plus an isolated child
 test invocation. The mutation and final-check targets are separate.
+
+Parent integration is a fast-forward of the exact tested source, so the
+worker's full ordinary test/lint receipts remain valid. The integrated owning
+two-test filter and full `make coverage` also pass with the same native
+53/28/4 suite, two hardware ignores and zero optional skips. Coverage uses
+`.work/target-coverage-private`, distinct from both mutation and ordinary
+targets. These counts locate remaining work; they do not close the quiet-host
+cost or whole-step gates.

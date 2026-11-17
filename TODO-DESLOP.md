@@ -22,7 +22,7 @@ see [filesystem evidence](docs/deslop-filesystem.md#private-file-admission-scena
 ## Report
 
 Current native coverage includes the environment-isolated child profiles:
-2,386/3,110 lines and 292/446 branches. Eight profiles were previously omitted
+2,454/3,173 lines and 295/446 branches after lock/mode integration. Eight profiles were previously omitted
 when two fixtures cleared LLVM's path; those partial reports are superseded.
 The current filesystem reconciliation resolves 56 saved misses (38 caught,
 18 equivalent), leaving nine unresolved misses and 52 originally untested
