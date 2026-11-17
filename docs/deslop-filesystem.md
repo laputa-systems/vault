@@ -227,16 +227,23 @@ metadata-size decisions and two bounded-read arithmetic operators.
 | Original missed region | Now caught | Equivalent | Still unresolved |
 | --- | ---: | ---: | ---: |
 | Directory policy | 7 | 0 | 0 |
-| Filename decoder | 4 | 4 | 0 |
+| Filename validators and decoder | 6 | 4 | 0 |
 | Private-file admission/read | 11 | 3 | 0 |
 | Directory opening | 9 | 7 | 0 |
-| Other regions | 0 | 0 | 20 |
+| Lock and mode repair | 5 | 4 | 0 |
+| Other regions | 0 | 0 | 9 |
 
+The two additional validator catches are `validate_name` returning `Ok(())`
+and `validate_store_name` changing `>` to `>=`. The six original hex-digit
+identities are `-` to `+` and `/` at 1171:34, `+` to `-` and `*` at
+1172:41, and `-` to `+` and `/` at 1172:34; only `+` to `*` is unviable.
 The four decoder and three private-file flag equivalences have the arguments above;
 the seven directory-opening flag equivalences are justified below. This
-resolves 45 saved misses; it does not rewrite the historical raw run
-(102 caught, 65 missed, six unviable, 59 untested). The 20 remaining saved
-misses and all 59 originally untested identities still need reconciliation.
+resolves 56 saved misses (38 caught and 18 equivalent); it does not rewrite the historical raw run
+(102 caught, 65 missed, six unviable, 59 untested). The nine remaining saved misses still need reconciliation. Six originally untested
+hex-digit identities also match the complete filename selection: five caught
+and one unviable. The shared mode return replacement also matches and is
+unviable, leaving 52 originally untested identities unreconciled.
 The private archive is retained at the canonical repository's
 `.git/preserved-checkouts/d-overlap-20261116T185745-linear/`; its receipt
 locates the original `mutants-macos-filesystem-final` inventory and outcomes.
@@ -328,10 +335,58 @@ instantiations. Export it with `cargo llvm-cov report --branch --json
 The report's four executable native modules are `main.rs`, `macos.rs`,
 `secure_enclave.rs` and `store.rs`; `linux.rs` is not compiled on macOS.
 Unrun Secure Enclave unwrap/recovery and hardware behavior remain separate
-from synthetic metadata policy. The 20 unresolved saved filesystem misses
-include lock creation, mode repair, sidecar/identity parsing and store
+from synthetic metadata policy. At that point the unresolved saved filesystem misses included lock creation, mode repair, sidecar/identity parsing and store
 bootstrap. OS-error and race branches outside the owned fixtures still need
 witnesses or explicit dispositions. Source-coordinate duplicates must be
 merged when locating an unrun decision. These counts are not a threshold,
 a fixed-scope before/after detection score or a timing claim; DSLP-4 remains
 open.
+
+
+## Lock and mode repair Scenario
+
+On macOS arm64 at base `62038b2a6b0c0b80f7d700e1dff3ed088ac8c99b`,
+owned TMPDIR fixtures check creation of `.vault.lock` at 0600, reopening
+without truncation, read/write access, CLOEXEC and NONBLOCK, permission repair,
+and hard-link, symlink and directory refusals with causal errors and positive
+controls. The descriptor alone does not lock: callers perform flock. An owned
+directory is repaired to 0700; a file is refused and synthetic foreign-owner
+metadata exercises the production admission helper without chown. A bound,
+unconnected owned UnixListener socket is repaired from 0666 to 0600, and a
+missing parent exercises chmod failure. Literal disk permissions exercise mode
+conversion through its real lock and directory callers. The private helper
+extraction in `8a7ba49` preserves fstat, admission, chmod and verification
+order and error text. A hand fault changing lock chmod to 0666 fails the 0600
+assertion (exit 101); restoring the source passes.
+
+With `PATH=/Users/josh/d/stuff/.work/tools/bin:$PATH`, `TMPDIR=$PWD/.work/tmp`,
+`RUSTC_WRAPPER=kache`, `CARGO_BUILD_JOBS=1`, `RUST_TEST_THREADS=1`, and
+`CARGO_TARGET_DIR=$PWD/.work/target-lock-mutants`, the complete selection ran:
+
+```sh
+timeout -k 5 1200 sh -c 'n=0; until mkdir /Users/josh/d/stuff/.work/tmp/mutation.lock 2>/dev/null; do n=$((n+1)); [ "$n" -lt 150 ] || exit 73; sleep 2; done; trap "rmdir /Users/josh/d/stuff/.work/tmp/mutation.lock" EXIT HUP INT TERM; cpu-guard --cores 2 -- cargo mutants --gitignore true --file src/macos.rs --re "(in (open_lock_file|set_directory_mode|ensure_owned_directory_metadata|set_socket_permissions|mode)|replace (open_lock_file|set_directory_mode|ensure_owned_directory_metadata|set_socket_permissions|mode) ->)" --baseline run --timeout 60 --build-timeout 300 --jobs 1 --no-shuffle --output .work/lock-mutants-final --cargo-test-arg=--bin --cargo-test-arg=vault --cargo-test-arg=macos::tests::lock_mode'
+```
+
+The fresh baseline selected two tests. The original `.work/lock-mutants-final`
+run and a repeat in `.work/lock-mutants-confirm` have identical identities
+and classes; the repeat confirmed raw exit 2. All 19 generated identities ran: 13
+caught, four missed, two unviable, none timed out or untested (tool exit 2).
+All logs were inspected. Each caught mutant failed an owning assertion; four
+misses replace OR with XOR among RDWR, CREATE, NOFOLLOW, NONBLOCK and CLOEXEC,
+which have disjoint bits on this target: RDWR 0x2, CREATE 0x200,
+NOFOLLOW 0x100, NONBLOCK 0x4 and CLOEXEC 0x1000000 (the installed libc
+BSD and Apple constants). Thus the flags and functional result are identical. No timing or memory equivalence is asserted. The two unviable
+return replacements require `File: Default` and `Mode: Default`, respectively.
+The nine original misses in this region match five caught and four equivalent
+mutants, including the extracted admission expression. The original untested
+`mode` return replacement matches the unviable case. No exclusion was added;
+raw historical counts remain 102 caught, 65 missed, six unviable and 59
+untested. The current corrected native coverage remains 2386/3110 lines and
+292/446 branches; this slice did not rerun coverage. Other regions, Linux,
+hardware and cost remain open, and DSLP-4 remains open.
+
+With the same environment and `CARGO_TARGET_DIR=$PWD/.work/target-lock-final`,
+`cpu-guard --cores 2 -- make test` and `cpu-guard --cores 2 -- make lint`
+both exit 0. The suite reports 53 unit, 28 integration and four terminal tests
+passed, two hardware tests ignored, zero optional skips, plus an isolated child
+test invocation. The mutation and final-check targets are separate.

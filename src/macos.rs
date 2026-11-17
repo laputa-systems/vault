@@ -1436,6 +1436,71 @@ mod tests {
     }
 
     #[test]
+    fn lock_mode_descriptor_and_admission() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::fs::symlink;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let path = fixture.path().join(".vault.lock");
+        let mut lock = super::open_lock_file(&dir).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert!(rustix::io::fcntl_getfd(&lock).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        let flags = rustix::fs::fcntl_getfl(&lock).unwrap();
+        assert!(flags.contains(rustix::fs::OFlags::NONBLOCK));
+        assert!(flags.contains(rustix::fs::OFlags::RDWR));
+        lock.write_all(b"original").unwrap();
+        drop(lock);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        let mut lock = super::open_lock_file(&dir).unwrap();
+        let mut bytes = Vec::new();
+        lock.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original");
+        lock.seek(SeekFrom::End(0)).unwrap();
+        lock.write_all(b"!").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"original!");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        drop(lock);
+        fs::hard_link(&path, fixture.path().join("hard")).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), "vault: macOS store lock has an unexpected hard link");
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        assert!(super::open_lock_file(&dir).is_ok());
+        fs::remove_file(&path).unwrap();
+        symlink("missing", &path).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), io_error("open macOS store lock", rustix::io::Errno::LOOP));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), io_error("open macOS store lock", rustix::io::Errno::ISDIR));
+        fs::remove_dir(&path).unwrap();
+        assert!(super::open_lock_file(&dir).is_ok());
+    }
+
+    #[test]
+    fn lock_mode_directory_and_socket_repair() {
+        let fixture = TestDir::new();
+        let path = fixture.path().join("directory");
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        let dir = fs::File::open(&path).unwrap();
+        super::set_directory_mode(&dir, 0o700, "fixture").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o700);
+        let mut metadata = rustix::fs::fstat(&dir).unwrap();
+        assert_eq!(super::ensure_owned_directory_metadata(&metadata, "fixture"), Ok(()));
+        metadata.st_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
+        assert_eq!(super::ensure_owned_directory_metadata(&metadata, "fixture").unwrap_err(), "vault: fixture is not an owned directory");
+        let file_path = fixture.path().join("file");
+        fs::write(&file_path, b"fixture").unwrap();
+        let file = fs::File::open(&file_path).unwrap();
+        assert_eq!(super::set_directory_mode(&file, 0o700, "fixture").unwrap_err(), "vault: fixture is not an owned directory");
+        let socket = fixture.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+        super::set_socket_permissions(&socket).unwrap();
+        assert_eq!(fs::metadata(&socket).unwrap().permissions().mode() & 0o7777, 0o600);
+        let missing = fixture.path().join("missing/socket");
+        assert_eq!(super::set_socket_permissions(&missing).unwrap_err(), io_error("restrict identity cache socket permissions", std::io::Error::from_raw_os_error(rustix::io::Errno::NOENT.raw_os_error())));
+    }
+
+    #[test]
     fn directory_open_policy_and_descriptors() {
         use std::os::unix::fs::MetadataExt;
         use std::path::Path;
