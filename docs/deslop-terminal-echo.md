@@ -9,6 +9,7 @@ let mut session = super::TerminalSession::enter(&mut terminal).unwrap();
 output.write_all(b"prompt: ").unwrap();
 output.flush().unwrap();
 session.restore().unwrap();
+drop(session);
 read_without_echo(&mut input, &mut output, true, 100, &mut terminal, || None, || Ok(())).unwrap();
 ```
 
@@ -35,4 +36,22 @@ docker run --rm --name vault-tty-prompt-worker --cpus 2 --platform linux/arm64 -
 
 The image contained rage 0.12.1 and the interoperability test passed. A separate `--nocapture` run showed that keyring permission and cache scope assertions skipped because the container kernel denied access. No forced scheduler or syscall delay was used, and no claim is made that the observed CI failure was reproduced on a PTY.
 
-No release build was run. One macOS debug `vault --help` observation reported 7,192,576 bytes maximum RSS and a 2,784,976-byte binary. These are observations, not performance gates.
+Parent review replaced the private tuple argument with named `TerminalFeedback`
+fields, retained lazy prompt construction for silent input, and kept primary
+input failures alongside signal-restoration failures. The same native tests and
+lint, plus the full Linux ARM64 test/lint command above, passed afterward.
+
+Native release-profile binaries were built at the base and candidate with
+`CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=$PWD/.work/target-release-compare
+RUSTC_WRAPPER=kache cpu-guard --cores 2 -- cargo build --release`.
+They occupy 897,024 and 896,320 bytes, respectively. Five alternating observations
+per side exercised the actual prompt/read/error path: run
+`/usr/bin/time -l PATH/TO/vault set PROBE` with stdin and stderr on a disposable
+PTY and HOME/XDG_DATA_HOME confined to scratch. Wait for the literal prompt and
+disabled ECHO, write `ff 0a`, require exit 1 with `invalid UTF-8`, empty stdout,
+and restored ECHO, then collect maximum resident set size. All ten observations
+passed, each reporting 6,733,824 bytes. This is a bounded input-error-path
+observation, not whole-store memory acceptance or a performance improvement.
+The worker's earlier debug `--help` sample did not exercise the changed path
+and is not qualification evidence. No timing gate was run on the busy host;
+Vault declares no runtime benchmark workload.

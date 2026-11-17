@@ -173,7 +173,7 @@ impl fmt::Display for CliError {
                 write!(f, "vault: failed to restore signal handlers: {source}")
             }
             Self::TerminalReadAndSignalRestore { read, restore } => {
-                write!(f, "vault: {read}; signal handler restoration also failed: {restore}")
+                write!(f, "{read}; signal handler restoration also failed: {restore}")
             }
             Self::SignalSuspend(source) => {
                 write!(f, "vault: failed to suspend for terminal job control: {source}")
@@ -560,16 +560,16 @@ fn run_child(
 fn read_secret(name: &str, silent: bool) -> Result<String, CliError> {
     let stdin = io::stdin();
     if rustix::termios::isatty(&stdin) {
-        let prompt = format!("Enter value for {name}: ");
+        let prompt = (!silent).then(|| format!("Enter value for {name}: "));
         let mut prompt_published = false;
         let mut signals = SignalHandlers::install()?;
         let mut terminal = TerminalFd { fd: &stdin };
         let read_result = read_without_echo(
             &mut stdin.lock(),
             &mut io::stderr().lock(),
-            (silent, (!silent).then_some(TerminalPrompt {
-                text: &prompt, operation: "write stderr", published: &mut prompt_published,
-            })),
+            TerminalFeedback { silent, prompt: prompt.as_deref().map(|text| TerminalPrompt {
+                text, operation: "write stderr", published: &mut prompt_published,
+            }) },
             MAX_SECRET_BYTES,
             &mut terminal,
             || {
@@ -666,9 +666,9 @@ fn read_passphrase(prompt: &str, passphrase_kind: &str) -> Result<SecretString, 
     let read_result = read_without_echo(
         &mut tty,
         &mut output,
-        (true, Some(TerminalPrompt {
+        TerminalFeedback { silent: true, prompt: Some(TerminalPrompt {
             text: prompt, operation: "write passphrase prompt", published: &mut prompt_published,
-        })),
+        }) },
         MAX_SECRET_BYTES,
         &mut terminal,
         || {
@@ -732,10 +732,15 @@ struct TerminalPrompt<'a> {
     published: &'a mut bool,
 }
 
+struct TerminalFeedback<'a> {
+    silent: bool,
+    prompt: Option<TerminalPrompt<'a>>,
+}
+
 fn read_without_echo<R, W, T, I, S>(
     input: &mut R,
     feedback: &mut W,
-    (silent, mut prompt): (bool, Option<TerminalPrompt<'_>>),
+    TerminalFeedback { silent, mut prompt }: TerminalFeedback<'_>,
     max_bytes: usize,
     terminal: &mut T,
     mut interrupted: I,
@@ -1031,7 +1036,7 @@ impl Drop for SignalHandlers {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, EnvSpec, MAX_SECRET_BYTES, TerminalPrompt, TerminalSettings, cmd_purge_with, parse_env_spec,
+        CliError, EnvSpec, MAX_SECRET_BYTES, TerminalFeedback, TerminalPrompt, TerminalSettings, cmd_purge_with, parse_env_spec,
         parse_exec_args, read_limited_utf8, read_without_echo, run_child,
     };
     use std::io::{self, Cursor, Read, Write};
@@ -1149,9 +1154,9 @@ mod tests {
         let mut output = ObservedIo(events.clone());
         let mut input = ObservedIo(events.clone());
         let mut published = false;
-        read_without_echo(&mut input, &mut output, (true, Some(TerminalPrompt {
+        read_without_echo(&mut input, &mut output, TerminalFeedback { silent: true, prompt: Some(TerminalPrompt {
             text: "prompt: ", operation: "write passphrase prompt", published: &mut published,
-        })), 100, &mut terminal, || None, || Ok(())).unwrap();
+        }) }, 100, &mut terminal, || None, || Ok(())).unwrap();
         assert!(published);
         assert_eq!(*events.borrow(), ["hide", "prompt", "read", "restore"]);
     }
@@ -1254,7 +1259,7 @@ mod tests {
         let value = read_without_echo(
             &mut input,
             &mut feedback,
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1295,7 +1300,7 @@ mod tests {
             read_without_echo(
                 &mut input,
                 &mut Vec::new(),
-                (true, None),
+                TerminalFeedback { silent: true, prompt: None },
                 3,
                 &mut terminal,
                 || None,
@@ -1311,7 +1316,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"abcd\n"),
             &mut feedback,
-            (false, None),
+            TerminalFeedback { silent: false, prompt: None },
             3,
             &mut terminal,
             || None,
@@ -1331,7 +1336,7 @@ mod tests {
         let error = read_without_echo(
             &mut input,
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1349,7 +1354,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut get_failure,
             || None,
@@ -1364,7 +1369,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut set_failure,
             || None,
@@ -1379,7 +1384,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut restore_failure,
             || None,
@@ -1399,9 +1404,9 @@ mod tests {
             let error = read_without_echo(
                 &mut Cursor::new(b"unused\n"),
                 &mut FailingWriter,
-                (true, Some(TerminalPrompt {
+                TerminalFeedback { silent: true, prompt: Some(TerminalPrompt {
                     text: "prompt: ", operation: "write passphrase prompt", published: &mut published,
-                })),
+                }) },
                 MAX_SECRET_BYTES,
                 &mut terminal,
                 || None,
@@ -1421,7 +1426,7 @@ mod tests {
         let error = read_without_echo(
             &mut FailingReader,
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1440,7 +1445,7 @@ mod tests {
         let error = read_without_echo(
             &mut FailingReader,
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1454,7 +1459,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut FailingWriter,
-            (false, None),
+            TerminalFeedback { silent: false, prompt: None },
             MAX_SECRET_BYTES,
             &mut terminal,
             || None,
@@ -1472,7 +1477,7 @@ mod tests {
         let error = read_without_echo(
             &mut Cursor::new(b"secret\n"),
             &mut Vec::new(),
-            (true, None),
+            TerminalFeedback { silent: true, prompt: None },
             MAX_SECRET_BYTES,
             &mut terminal,
             || Some(2),

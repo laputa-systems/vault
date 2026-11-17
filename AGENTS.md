@@ -15,6 +15,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - `cpu-guard --cores 6 -- make test`: macOS arm64 cold 15.23s, warm 4.43s; two Secure Enclave authentication tests ignored.
 - `cpu-guard --cores 6 -- make lint`: macOS arm64 9.80s after test build.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
+- Prompt-to-read echo ownership and prompt-failure restoration: `src/main.rs` tests `prompt_and_read_share_one_hidden_terminal_session` and `prompt_failure_restores_echo_and_reports_restore_failure`; Linux controlling-terminal behavior: `tests/terminal_cli.rs`. Exact proof and limits: `docs/deslop-terminal-echo.md`.
 - Secret set/get/list/remove, passphrases, size limits and cache: Linux `tests/terminal_cli.rs` and `src/linux.rs` tests; macOS `src/macos.rs` tests, with hardware roundtrip ignored by default.
 - age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability test skips without rage 0.12.1.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
