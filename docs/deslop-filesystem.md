@@ -72,3 +72,60 @@ Timing/cost comparison, coverage, the remaining filesystem regions and final
 platform evidence remain deferred. Host constraints mean these runs establish
 correctness, not the Tests cost budget. DSLP-4 remains open and the draft remains
 unmerged.
+
+## Filename codec Scenario
+
+On macOS arm64, base `0561a3e34828db0164d2a2baedfad2c1a7b3a611`,
+this slice replaces the roundtrip-only filename oracle with literal encoding
+and decoding examples, invalid filename cases and exact 125/126 UTF-8 byte
+boundaries. The parser table remains private because malformed stems have a
+wide input space. Changing `validate_store_name` from `>` to `>=` makes the
+125-byte assertion fail; restoring the source passes. No production code was
+changed. The integration cache fixture's shorter directory name allows its
+socket to fit when the mandated worktree TMPDIR is used.
+
+Cargo-mutants 27.1.0 listed all 36 generated mutants in `validate_name`,
+`validate_store_name`, `secret_filename`, `decode_secret_filename`, and
+`hex_digit`, including return and expression mutations. With `PATH` prefixed
+by `/Users/josh/d/stuff/.work/tools/bin`, `TMPDIR=$PWD/.work/tmp`,
+`RUSTC_WRAPPER=kache`, `CARGO_BUILD_JOBS=1`, `RUST_TEST_THREADS=1`, and
+`CARGO_TARGET_DIR=$PWD/.work/target-codec-mutants`, the shared mutation lock
+was held for a fresh baseline and this full-suite selection:
+
+```sh
+cpu-guard --cores 2 -- cargo mutants --gitignore true --file src/macos.rs \
+  --re '(in (validate_name|validate_store_name|secret_filename|decode_secret_filename|hex_digit)|replace (validate_name|validate_store_name|secret_filename|decode_secret_filename|hex_digit) ->)' \
+  --baseline run --timeout 60 --build-timeout 300 --jobs 1 --no-shuffle \
+  --output .work/codec-retry
+```
+
+The completed run exits 2: 31 caught, four missed, one unviable, no timeouts.
+All caught logs were inspected: 30 fail in the codec test's assertions or
+unwraps; `hex_digit`'s `+` to `-` mutation instead panics on arithmetic
+underflow in that test. The `+` to `*` mutation is unviable due to a compile-time
+arithmetic overflow. Four misses are equivalent for the observable result:
+
+- At 1153:24, `||` to `&&` lets empty and odd stems through the first guard;
+  empty names fail validation, and odd stems cannot equal their re-encoding.
+- At 1153:47, `||` to `&&` lets odd or oversized stems through; odd stems
+  cannot equal their re-encoding, while oversized even stems fail name length
+  validation (or UTF-8/hex decoding first).
+- At 1160:32, `|` to `^` combines nonoverlapping high and low four-bit nibbles.
+- At 1163:44, `||` to `&&` still returns `None` for an invalid name because
+  `secret_filename` repeats the same validation and its `ok()?` exits.
+
+No exclusions were added. The first baseline exited 4 before any mutant: two
+cache integration tests rejected the overly long fixture socket path. After
+shortening the fixture name, four focused cache-daemon tests and the fresh
+baseline passed. The original stopped 232-case filesystem run remains 102
+caught, 65 missed, six unviable and 59 untested; this component is not a
+reclassification of those results. The 21-mutant directory qualification is
+unchanged. Other filesystem regions, coverage, cost and platform evidence
+remain open, so DSLP-4 remains open.
+
+With the same environment and a separate `CARGO_TARGET_DIR=$PWD/.work/target-codec-final`,
+`cpu-guard --cores 2 -- make test` and `cpu-guard --cores 2 -- make lint`
+both pass. The suite reports 44 unit, 28 integration and four terminal tests
+passed, two hardware tests ignored and zero optional skips. An initial test
+wrapper lost its exit status to zsh's readonly `status` variable despite green
+output; the command was rerun successfully.

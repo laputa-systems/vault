@@ -1363,7 +1363,7 @@ fn io_error(operation: &str, source: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_NAME_BYTES, SECURE_ENCLAVE_NAME, STORE_NAME, cleanup_failure,
+        SECURE_ENCLAVE_NAME, STORE_NAME, cleanup_failure,
         create_staging_directory, data_home_from, decode_secret_filename, initialize_store,
         open_data_home, open_store, read_age_values, recover_at,
         secret_filename, set_secret_at, validate_store_name,
@@ -1431,13 +1431,33 @@ mod tests {
 
     #[test]
     fn secret_name_filename_encoding_is_canonical_and_path_safe() {
-        for name in ["TOKEN", "one.two", "slash/name", "é" ] {
-            let filename = secret_filename(name).unwrap();
-            assert_eq!(decode_secret_filename(&filename).as_deref(), Some(name));
-            assert!(!filename.contains('/'));
+        for (name, filename) in [
+            ("TOKEN", "544f4b454e.age"),
+            ("one.two", "6f6e652e74776f.age"),
+            ("slash/name", "736c6173682f6e616d65.age"),
+            ("é", "c3a9.age"),
+            ("~", "7e.age"),
+        ] {
+            assert_eq!(secret_filename(name).unwrap(), filename, "encode {name:?}");
+            assert_eq!(decode_secret_filename(filename).as_deref(), Some(name), "decode {filename:?}");
         }
-        assert!(validate_store_name(&"x".repeat(MAX_NAME_BYTES + 1)).is_err());
-        assert_eq!(decode_secret_filename("4142.age").as_deref(), Some("AB"));
+        for filename in [".age", "0.age", "00.age", "ff.age", "c3.age", "gg.age", "4G.age", "4f.AGE", "4f.agex", "4F.age", "4f", "4f.age.age"] {
+            assert_eq!(decode_secret_filename(filename), None, "reject {filename:?}");
+        }
+        for name in ["", "a\0b"] {
+            assert!(validate_store_name(name).is_err(), "reject {name:?}");
+            assert!(secret_filename(name).is_err(), "reject {name:?}");
+        }
+        let limit = "é".repeat(62) + "x";
+        let over = "é".repeat(63);
+        let encoded_limit = "c3a9".repeat(62) + "78.age";
+        let encoded_over = "c3a9".repeat(63) + ".age";
+        assert!(validate_store_name(&limit).is_ok());
+        assert!(validate_store_name(&over).is_err());
+        assert_eq!(secret_filename(&limit).unwrap(), encoded_limit);
+        assert!(secret_filename(&over).is_err());
+        assert_eq!(decode_secret_filename(&encoded_limit).as_deref(), Some(limit.as_str()));
+        assert_eq!(decode_secret_filename(&encoded_over), None);
     }
 
     #[test]

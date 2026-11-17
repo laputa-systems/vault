@@ -157,7 +157,7 @@ impl CacheDaemonFixture {
         use age::secrecy::ExposeSecret;
         use std::io::Write;
 
-        let path = std::env::temp_dir().join(format!("vault-cache-{suffix}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("vc-{suffix}-{}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         let home = CacheHome(path);
         std::fs::create_dir(home.0.join("vault")).unwrap();

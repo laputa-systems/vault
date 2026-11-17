@@ -108,6 +108,13 @@ was rejected. Coverage, quiet-host cost and the remaining regions keep DSLP-4
 open. [The filesystem record](docs/deslop-filesystem.md) retains exact proof
 and limits.
 
+Filename codec continuation: the complete 36-mutant component Scenario has 31
+caught, four equivalent misses, one unviable and no timeouts. Literal codec and
+UTF-8 byte-limit assertions have a restored hand-fault witness; the full suite
+and lint pass in a separate target. The original 232-case run remains
+incomplete with its original counts, and unrelated regions, coverage and cost
+remain open. See [the filesystem record](docs/deslop-filesystem.md).
+
 ## Tickets
 
 
