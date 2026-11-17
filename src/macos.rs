@@ -1449,6 +1449,48 @@ mod tests {
     }
 
     #[test]
+    fn identity_input_prompts_and_error_formatting() {
+        use crate::secure_enclave::SecureEnclaveError;
+        assert_eq!(super::RecoveryPrompt::Create.prompt(), "Create recovery passphrase: ");
+        assert_eq!(super::RecoveryPrompt::Confirm.prompt(), "Confirm recovery passphrase: ");
+        assert_eq!(super::RecoveryPrompt::Unlock.prompt(), "Recovery passphrase: ");
+        for (error, expected) in [
+            (SecureEnclaveError::Cancelled, "vault: Secure Enclave authentication was cancelled"),
+            (SecureEnclaveError::Unavailable("offline".into()), "vault: Secure Enclave is unavailable: offline"),
+            (SecureEnclaveError::LockedOut("locked".into()), "vault: Secure Enclave authentication is locked out: locked"),
+            (SecureEnclaveError::CorruptSidecar("broken".into()), "vault: Secure Enclave sidecar is corrupt: broken"),
+            (SecureEnclaveError::Failed("failure".into()), "vault: Secure Enclave operation failed: failure"),
+        ] {
+            assert_eq!(super::format_secure_enclave_error(error), expected);
+        }
+        assert_eq!(super::io_error("read fixture", "broken"), "vault: read fixture failed: broken");
+    }
+
+    #[test]
+    fn identity_input_identity_bytes() {
+        use zeroize::Zeroizing;
+        const IDENTITY: &str = "AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33";
+        let parsed = super::identity_from_bytes(Zeroizing::new(IDENTITY.as_bytes().to_vec())).unwrap();
+        assert_eq!(parsed.to_string().expose_secret(), IDENTITY);
+        for bytes in [b"malformed".to_vec(), vec![0xff], format!("{IDENTITY}\r").into_bytes(), format!("{IDENTITY}\n").into_bytes(), format!("{IDENTITY}\r\n").into_bytes()] {
+            assert_eq!(super::identity_from_bytes(Zeroizing::new(bytes)).err().unwrap(), "vault: Secure Enclave returned an invalid age identity");
+        }
+    }
+
+    #[test]
+    fn identity_input_sidecar_read_and_validation() {
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: cannot read Secure Enclave identity: vault: identity.se: not found");
+        let path = fixture.path().join(SECURE_ENCLAVE_NAME);
+        let sidecar = framed_sidecar();
+        fs::write(&path, &sidecar).unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap(), sidecar);
+        fs::write(&path, b"bad header").unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: Secure Enclave sidecar is corrupt: unsupported or truncated Secure Enclave sidecar");
+    }
+
+    #[test]
     fn staging_list_names_and_enumeration() {
         use std::os::unix::ffi::OsStringExt;
         use std::os::unix::fs::symlink;

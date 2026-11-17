@@ -1,3 +1,5 @@
+Identity input witnesses resolve six original misses (five caught, one equivalent) and four original untested formatting mutants; three hardware-sensitive misses remain. DSLP-4 remains open; see [filesystem evidence](docs/deslop-filesystem.md#identity-input-scenario).
+
 Staging/listing witnesses reconcile 17 original untested identities: 15 caught and two unviable; the mutation wrapper exit was not captured. DSLP-4 remains open; see [filesystem evidence](docs/deslop-filesystem.md#staging-and-listing-scenario).
 
 Prefix: DSLP
