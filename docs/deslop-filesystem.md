@@ -484,8 +484,12 @@ Cargo-mutants 27.1.0 completed 19 generated return and expression mutants:
 15 caught, four unviable, zero missed, timeout or untested. All caught logs
 were inspected and fail the fixture assertions; the four unviable replacements
 require `File: Default` and fail compilation. No exclusions were used. The
-outer command's exit status was not captured, although the complete raw
-outcomes and baseline are available in `.work/staging-mutants/mutants.out`.
+first command's outer exit status was not captured, so that proof was
+incomplete. Parent completion repeated the same 19 identities with a fresh
+baseline and saved outer exit 0 in `.work/tmp/staging-parent.exit`; all
+classes match, and every caught log fails a staging/listing assertion. The
+new outcomes are in `.work/staging-parent/mutants.out`; the first raw run is
+retained separately.
 
 The 17 original untested identities map by function and expression to 15 caught
 (remove-staging two, remove-entries one, cleanup-failure two, managed-names
@@ -506,4 +510,6 @@ CARGO_TARGET_DIR=$PWD/.work/target-staging-mutants timeout -k 5 1200 sh -c 'whil
 With the separate `CARGO_TARGET_DIR=$PWD/.work/target-staging-final`,
 `cpu-guard --cores 2 -- make test` and `cpu-guard --cores 2 -- make lint`
 exit 0. Tests report 59 unit, 28 integration and four terminal passes, two
-hardware ignores and zero optional skips. No coverage or performance claim is made.
+hardware ignores and zero named optional checks skipped. The unrepresentable
+non-UTF-8 filename branch is separately unrun. No coverage or performance
+claim is made.
