@@ -3,6 +3,11 @@ Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
+Atomic file continuation: 31 formerly untested identities reconcile to 25
+caught, four equivalent flag expressions and two unviable; six moved guard
+mutations were injected separately. OS fault windows and other regions remain
+open. See [filesystem evidence](docs/deslop-filesystem.md#atomic-file-scenario).
+
 Lock and mode continuation: the complete 19-mutant selection has 13 caught,
 four equivalent flag expressions and two unviable. Nine saved misses map to
 five caught and four equivalent; DSLP-4 remains open. See
@@ -25,8 +30,9 @@ Current native coverage includes the environment-isolated child profiles:
 2,454/3,173 lines and 295/446 branches after lock/mode integration. Eight profiles were previously omitted
 when two fixtures cleared LLVM's path; those partial reports are superseded.
 The current filesystem reconciliation resolves 56 saved misses (38 caught,
-18 equivalent), leaving nine unresolved misses and 52 originally untested
-identities after matching six hex-digit cases and the mode return replacement.
+18 equivalent), leaving nine unresolved misses. Atomic-file reconciliation
+resolves 31 more original untested identities (25 caught, four equivalent,
+two unviable), leaving 21 originally untested identities.
 Hardware/Linux and unrelated error/race decisions remain open;
 see [filesystem evidence](docs/deslop-filesystem.md#subprocess-coverage-collection).
 

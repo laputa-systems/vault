@@ -398,3 +398,66 @@ two-test filter and full `make coverage` also pass with the same native
 `.work/target-coverage-private`, distinct from both mutation and ordinary
 targets. These counts locate remaining work; they do not close the quiet-host
 cost or whole-step gates.
+
+## Atomic file Scenario
+
+On macOS arm64, base `10d38f5da5155aefcc0b552058e5bf61d3901fd2`,
+source candidate `726acb5e031be33f36733bc0e8d193850f1d2f67`, owned
+fixtures verify missing and replacement writes, literal bytes, mode 0600,
+no temporary leftovers, and symlink, directory and hard-link refusal with
+objects intact. Synthetic metadata verifies foreign ownership and the type,
+link-count, owner error priority. The extracted production helper preserves
+that priority and the original syscalls. Private name injection checks one
+collision, all 32 attempts, and a real open error. Real generated names carry
+the prefix and PID and are unique; descriptors are write-only and CLOEXEC.
+Cleanup preserves the primary error for unlink success and absence, and adds
+the actual OS error while retaining a directory. Filename cases cover the
+existing internal policy and actual names without extending it.
+
+Hand faults skipping the hard-link guard and changing 32 attempts to 31 both
+failed the intended tests (exit 101), then were restored. The extraction
+moves the original three match guards into `ensure_atomic_destination_metadata`;
+forcing each condition to `true` and then `false` independently produced six
+more test failures (exit 101), with original source restored each time.
+
+With cargo-mutants 27.1.0, the following uses a fresh baseline, the exclusive
+lock and three selected tests. `PATH=/Users/josh/d/stuff/.work/tools/bin:$PATH`,
+`TMPDIR=$PWD/.work/tmp`, `RUSTC_WRAPPER=kache`, `CARGO_BUILD_JOBS=1`,
+`RUST_TEST_THREADS=1`, and `CARGO_TARGET_DIR=$PWD/.work/target-atomic-mutants`:
+
+```sh
+timeout -k 5 1200 sh -c 'n=0; until mkdir /Users/josh/d/stuff/.work/tmp/mutation.lock 2>/dev/null; do n=$((n+1)); [ "$n" -lt 150 ] || exit 73; sleep 2; done; trap "rmdir /Users/josh/d/stuff/.work/tmp/mutation.lock" EXIT HUP INT TERM; cpu-guard --cores 2 -- cargo mutants --gitignore true --file src/macos.rs --re "(in (atomic_write|ensure_atomic_destination_metadata|create_temporary_file|create_temporary_file_with|cleanup_temporary_file|validate_filename|next_temp_name)|replace (atomic_write|ensure_atomic_destination_metadata|create_temporary_file|create_temporary_file_with|cleanup_temporary_file|validate_filename|next_temp_name) ->)" --baseline run --timeout 60 --build-timeout 300 --jobs 1 --no-shuffle --output .work/atomic-mutants --cargo-test-arg=--bin --cargo-test-arg=vault --cargo-test-arg=macos::tests::atomic_file'
+```
+
+The complete 28-identity selection exits 2: 20 caught, four missed, four
+unviable, zero timeouts or untested. Every caught and survivor log was
+inspected. The four missed flag expressions replace OR with XOR: WRONLY 0x1,
+CREATE 0x200, EXCL 0x800, NOFOLLOW 0x100, CLOEXEC 0x1000000 are disjoint
+on this target, so each produces identical open flags. The four unviable
+return replacements for the original wrapper and extracted helper require
+`File: Default`. No exclusion was added, and no timing or memory equivalence
+is claimed.
+
+The original 31 untested identities map by expression: atomic write's return,
+three guard true/false pairs and three operators are caught (six by the
+restored manual injections); temporary creation's four AND flag mutations
+are caught, four XOR expressions equivalent, and two wrapper return mutations
+unviable; cleanup's two returns, filename's seven expressions and name
+generator's two returns are caught. Thus 25 caught, four equivalent and two
+unviable reconcile this slice. The extra helper return mutations are separately
+unviable. Historical raw counts remain 102 caught, 65 missed, six unviable and
+59 untested; nine saved misses and 21 formerly untested identities remain.
+
+Deterministic write/fsync and rename failures after temporary creation, and
+parent-directory fsync failure after rename, were not exercised: this scope
+allows no filesystem adapter, race, privileged mount or forced filesystem
+fault. A preexisting destination directory is refused before temp creation.
+Successful writes do not establish crash durability. Other filesystem regions,
+Linux, Secure Enclave hardware and cost remain open; DSLP-4 stays open.
+
+With the same environment and `CARGO_TARGET_DIR=$PWD/.work/target-atomic-final`,
+separate from mutation, `cpu-guard --cores 2 -- make test` exits 0 (56 unit,
+28 integration and four terminal tests passed, two hardware tests ignored,
+zero optional skips) and `cpu-guard --cores 2 -- make lint` exits 0. The unit
+output also includes an isolated child invocation. No coverage rerun or
+performance claim is made.
