@@ -323,8 +323,17 @@ fn set_too_few_args_errors() {
 }
 
 #[test]
-fn set_too_many_args_errors() {
-    assert!(!vault(&["set", "A", "B"]).unwrap().status.success());
+fn secret_commands_reject_surplus_names_before_accessing_storage() {
+    for cmd in ["set", "isset", "get", "rm"] {
+        let out = isolated_vault_command()
+            .args([cmd, "A", "B"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{cmd}");
+        assert!(out.stdout.is_empty(), "{cmd}: {:?}", out.stdout);
+        assert_eq!(out.stderr, format!("vault: unexpected argument for {cmd}\n").as_bytes());
+    }
 }
 
 #[test]
