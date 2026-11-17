@@ -58,6 +58,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: 0.13.7
+      - name: Select Python for the mutation gate
+        run: |
+          uv python install 3.15
+          dirname "$(uv python find --managed-python 3.15)" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-mutants@27.1.0
@@ -94,6 +101,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: 0.13.7
+      - name: Select Python for the mutation gate
+        run: |
+          uv python install 3.15
+          dirname "$(uv python find --managed-python 3.15)" >> "$GITHUB_PATH"
       - name: Test and lint
         run: |
           mkdir -p .work/tmp
