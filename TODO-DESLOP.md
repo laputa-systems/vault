@@ -26,7 +26,7 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 The platform trial [#30](https://github.com/laputa-systems/vault/pull/30)
 at `0671858b` passed the ordinary Linux x86-64 musl, Linux ARM64 musl
 and macOS jobs. The aggregate failed. Fourteen Linux mutation shards
-failed after roughly 20 minutes, and the 12 failed macOS shards
+failed after roughly 20 minutes, and the 13 failed macOS shards
 included incomplete runs. A separate
 [budget receipt](https://github.com/laputa-systems/vault/commit/e8c79312e9fa1faa503b90708ab50b414e720ecf)
 records the change that preserves partial results.
