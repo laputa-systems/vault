@@ -23,6 +23,21 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 | redundant_clone | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
 | needless_pass_by_value | 4 / 3 | 0 | 0 | 4 / 3 | Reject: ownership and callbacks |
 
+The platform trial [#30](https://github.com/laputa-systems/vault/pull/30)
+at `0671858b` passed the ordinary Linux x86-64 musl, Linux ARM64 musl
+and macOS jobs. The aggregate failed. Fourteen Linux mutation shards
+failed after roughly 20 minutes, and the 13 failed macOS shards
+included incomplete runs. A separate
+[budget receipt](https://github.com/laputa-systems/vault/commit/e8c79312e9fa1faa503b90708ab50b414e720ecf)
+records the change that preserves partial results.
+
+The ordinary jobs leave Secure Enclave authentication, two-Mac
+recovery and the Linux session keyring unqualified. The recovery
+check requires two independent Secure Enclave Macs, owner
+authentication and a disposable store. The Linux keyring check
+requires a runner with a usable session keyring and confirmation
+that its assertions executed.
+
 ## Tickets
 
 
@@ -32,8 +47,8 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 
 - **Area:** deslop · tests
 - **Where:** test suites and CI
-- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists.
-- **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
+- **Problem:** Draft #30 supplies platform and store mutation evidence, but the union failed and the required cost and controls are unqualified.
+- **Recommendation:** Account for the remaining Linux and macOS identities at their actual job budgets. Qualify the executed controls and record the separate hardware and keyring evidence.
 - **Fix with:** deslop
 - **Effort:** M
 
@@ -59,7 +74,7 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 
 ### DSLP-7 · P3 · Cross-Mac recovery has no end-to-end check
 
-- **Area:** Tests · recovery
+- **Area:** Needs owner · two-Mac recovery
 - **Where:** src/macos.rs:291, src/macos.rs:1474, tests/security_macos/README.md:19
 - **Problem:** Test-gap finding: recovery decrypts the backup identity and replaces the device-bound sidecar, but the ignored roundtrip exercises only one Mac; the harness documentation says cross-Mac recovery requires a separate check. Failure of cross-Mac recovery is unproven. A user discovering an incompatibility only after moving a backup could lose access to secrets.
 - **Recommendation:** Add a documented, repeatable two-Mac recovery boundary check using a disposable store, verifying recovery and readback after transfer, plus rejection of a wrong passphrase. Include src/macos.rs, src/secure_enclave.rs and src/store.rs in the critical mutation scope.
