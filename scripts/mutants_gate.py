@@ -22,10 +22,14 @@ class GateError(Exception):
     pass
 
 
-def untested(pending):
+class BudgetExhausted(Exception):
+    pass
+
+
+def unresolved(pending):
     shown = ', '.join(pending[:10])
     more = f' and {len(pending) - 10} more' if len(pending) > 10 else ''
-    return f'budget exhausted; {len(pending)} untested: {shown}{more}'
+    return f'budget exhausted; {len(pending)} unresolved: {shown}{more}'
 
 
 def classify(path, status, config):
@@ -76,7 +80,7 @@ def parse_changes(data):
     return changes
 
 
-def read_results(path, selected, *, baseline=True):
+def read_results(path, selected, *, baseline=True, allow_partial=False):
     try:
         data = json.loads(path.read_text())
         outcomes = data['outcomes']
@@ -109,7 +113,8 @@ def read_results(path, selected, *, baseline=True):
             results[name] = summary
         if baselines != int(baseline):
             raise ValueError('missing or duplicate baseline')
-        if set(results) != set(selected) or data['total_mutants'] != len(selected):
+        if (not results.keys() <= set(selected) or data['total_mutants'] != len(results)
+                or (not allow_partial and len(results) != len(selected))):
             raise ValueError('tested count or identities differ from selection')
         for kind in summaries.values():
             if data[kind] != list(results.values()).count(kind):
@@ -282,7 +287,7 @@ def main():
     def run(args, *, allowed=(0,), capture=True):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise GateError(untested(pending))
+            raise BudgetExhausted
         process = subprocess.Popen(args, cwd=ROOT, text=True, stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.PIPE if capture else None, start_new_session=True)
         try:
@@ -290,7 +295,7 @@ def main():
         except subprocess.TimeoutExpired as error:
             os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
-            raise GateError(untested(pending)) from error
+            raise BudgetExhausted from error
         except BaseException:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -426,14 +431,26 @@ def main():
             pending[:] = [n for _, _, ns in phases[index:] for n in ns]
             print(f'phase: {label}; selected {len(names)}', flush=True)
             out = run_root / f'phase-{index}'
-            run(common + ['--baseline', 'run', '--timeout', str(config['timeout_seconds']),
-                '--build-timeout', str(config['build_timeout_seconds']), '--jobs', str(config['jobs']),
-                '--output', str(out)] + args, allowed=(0, 2, 3), capture=False)
-            results = read_results(out / 'mutants.out/outcomes.json', names)
+            exhausted = None
+            try:
+                run(common + ['--baseline', 'run', '--timeout', str(config['timeout_seconds']),
+                    '--build-timeout', str(config['build_timeout_seconds']), '--jobs', str(config['jobs']),
+                    '--output', str(out)] + args, allowed=(0, 2, 3), capture=False)
+            except BudgetExhausted as error:
+                exhausted = error
+            try:
+                results = read_results(out / 'mutants.out/outcomes.json', names, allow_partial=exhausted is not None)
+            except GateError as error:
+                if exhausted is None:
+                    raise
+                print(error, file=sys.stderr, flush=True)
+                raise exhausted from error
             for name, result in results.items():
                 counts[result] += 1
                 if result != 'timeout':
                     pending.remove(name)
+            if exhausted is not None:
+                raise exhausted
             for number, name in enumerate(n for n, v in results.items() if v == 'timeout'):
                 regex = '^' + re.sub(r'([\\.^$|?*+()\[\]{}])', r'\\\1', name) + '$'
                 retry_args = ['--re', regex]
@@ -454,6 +471,8 @@ def main():
                     counts[rerun] += 1
                 pending.remove(name)
             verdict(results)
+    except BudgetExhausted as error:
+        raise GateError(unresolved(pending)) from error
     finally:
         print('\nEvidence:', flush=True)
         print(f'base: {base_sha}; head: {head}{dirty}; {version}', flush=True)

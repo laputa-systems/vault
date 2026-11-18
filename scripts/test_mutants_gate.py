@@ -158,6 +158,18 @@ class ResultsTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, 'incomplete'):
             read_results(self.path, ['other'])
 
+    def test_partial_results_still_require_valid_counts_and_identities(self):
+        self.write()
+        self.assertEqual(
+            read_results(self.path, ['mutant', 'other'], allow_partial=True),
+            {'mutant': 'caught'},
+        )
+        with self.assertRaisesRegex(GateError, 'incomplete'):
+            read_results(self.path, ['other'], allow_partial=True)
+        self.write(count=2)
+        with self.assertRaisesRegex(GateError, 'incomplete'):
+            read_results(self.path, ['mutant', 'other'], allow_partial=True)
+
     def test_missed_timeout_and_confirmed_hang(self):
         for summary, message in [('MissedMutant', 'missed'), ('Timeout', 'unresolved timeout')]:
             self.write(summary)
@@ -220,13 +232,17 @@ else:
     (out / 'log').mkdir(parents=True)
     (out / 'log/baseline.log').write_text('baseline passed')
     outcomes = [{'scenario': 'Baseline', 'summary': 'Success', 'log_path': 'log/baseline.log'}]
-    for item in items:
+    partial = os.environ.get('FAKE_MUTANT_PARTIAL')
+    completed = [changed] if partial else items
+    for item in completed:
         kind = 'MissedMutant' if item == critical else 'CaughtMutant'
         log = 'log/' + ('critical' if item == critical else 'changed') + '.log'
         (out / log).write_text('oracle passed' if item == critical else 'behavior assertion failed')
         outcomes.append({'scenario': {'Mutant': item}, 'summary': kind, 'log_path': log})
-    (out / 'outcomes.json').write_text(json.dumps({'outcomes': outcomes, 'total_mutants': 2,
-        'caught': 1, 'missed': 1, 'timeout': 0, 'unviable': 0}))
+    (out / 'outcomes.json').write_text(json.dumps({'outcomes': outcomes, 'total_mutants': len(completed),
+        'caught': 1, 'missed': 0 if partial else 1, 'timeout': 0, 'unviable': 0}))
+    if partial:
+        time.sleep(10)
     sys.exit(2)
 ''')
             cargo.chmod(0o755)
@@ -248,6 +264,15 @@ else:
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn('budget exhausted', result.stderr)
+            del env['FAKE_MUTANT_WAIT']
+            env['FAKE_MUTANT_PARTIAL'] = '1'
+            config_path.write_text(config_path.read_text().replace('budget_seconds = 1', 'budget_seconds = 3'))
+            result = subprocess.run([sys.executable, '-B', str(root / 'scripts/mutants_gate.py'),
+                                     'HEAD', 'linux', '0'], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('caught=1, missed=0', result.stdout)
+            self.assertIn('budget exhausted; 1 unresolved: src/store.rs:1:1: critical mutation', result.stderr)
 
 
 if __name__ == '__main__':
