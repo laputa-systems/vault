@@ -1626,6 +1626,46 @@ mod tests {
     }
 
     #[test]
+    fn lock_mode_descriptor_and_admission() {
+        use super::io_error;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::fs::symlink;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let path = fixture.path().join(".vault.lock");
+        let mut lock = super::open_lock_file(&dir).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert!(rustix::io::fcntl_getfd(&lock).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        let flags = rustix::fs::fcntl_getfl(&lock).unwrap();
+        assert!(flags.contains(rustix::fs::OFlags::NONBLOCK));
+        assert!(flags.contains(rustix::fs::OFlags::RDWR));
+        lock.write_all(b"original").unwrap();
+        drop(lock);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        let mut lock = super::open_lock_file(&dir).unwrap();
+        let mut bytes = Vec::new();
+        lock.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original");
+        lock.seek(SeekFrom::End(0)).unwrap();
+        lock.write_all(b"!").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"original!");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        drop(lock);
+        fs::hard_link(&path, fixture.path().join("hard")).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), "vault: macOS store lock has an unexpected hard link");
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        assert!(super::open_lock_file(&dir).is_ok());
+        fs::remove_file(&path).unwrap();
+        symlink("missing", &path).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), io_error("open macOS store lock", rustix::io::Errno::LOOP));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), io_error("open macOS store lock", rustix::io::Errno::ISDIR));
+        fs::remove_dir(&path).unwrap();
+        assert!(super::open_lock_file(&dir).is_ok());
+    }
+
+    #[test]
     fn application_support_path_uses_xdg_or_macos_default() {
         let cases = [
             (
