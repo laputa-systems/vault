@@ -200,4 +200,26 @@ mod tests {
         ciphertext[last] ^= 1;
         assert!(decrypt_secret(&identity, &ciphertext).is_err());
     }
+    #[test]
+    fn recipient_and_identity_validation_rejects_mismatches_and_bad_lines() {
+        use super::parse_recipient;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let other = age::x25519::Identity::generate().to_public();
+        assert!(validate_identity_recipient(&identity, &recipient).is_ok());
+        assert!(validate_identity_recipient(&identity, &other).is_err());
+        let address = recipient.to_string();
+        assert!(parse_recipient(address.as_bytes()).is_ok());
+        for invalid in ["", "\n\n", "\r"] {
+            assert_eq!(parse_recipient(invalid.as_bytes()).unwrap_err(), "vault: public recipient is malformed");
+        }
+        assert_eq!(parse_recipient(address.to_uppercase().as_bytes()).unwrap_err(), "vault: public recipient is not in canonical form");
+        let passphrase = || SecretString::from("disposable test passphrase".to_owned());
+        let encrypted = encrypt_identity(b"invalid\ridentity", passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity has an invalid format");
+        let encrypted = encrypt_identity(b"invalid\nidentity", passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity has an invalid format");
+    }
+
+
 }
