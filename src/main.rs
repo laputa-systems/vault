@@ -1041,6 +1041,130 @@ mod tests {
     };
     use std::io::{self, Cursor, Read, Write};
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn signal_handler_native_faults() {
+        use super::SignalHandlers;
+        use std::fs;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const ROOT: &str = "VAULT_SIGNAL_ROOT";
+        const MODE: &str = "VAULT_SIGNAL_MODE";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let mode = std::env::var(MODE).unwrap();
+            fs::write(root.join("entered"), b"yes").unwrap();
+            fs::write(root.join("armed"), b"yes").unwrap();
+            match mode.as_str() {
+                "install" | "interrupt" | "combined" => {
+                    let error = match SignalHandlers::install() { Err(error) => error, Ok(_) => panic!("install succeeded") };
+                    match error {
+                        CliError::SignalSetup { source, restore } => {
+                            assert_eq!(source.raw_os_error(), Some(if mode == "interrupt" { 22 } else { 5 }));
+                            assert_eq!(restore.and_then(|e| e.raw_os_error()), if mode == "combined" { Some(5) } else { None });
+                        }
+                        other => panic!("wrong error: {other:?}"),
+                    }
+                }
+                "restore" | "suspend-restore" => {
+                    let mut handlers = SignalHandlers::install().unwrap();
+                    assert_eq!(handlers.previous.len(), 5);
+                    if mode == "restore" {
+                        assert_eq!(handlers.restore().unwrap_err().raw_os_error(), Some(5));
+                    } else {
+                        match handlers.suspend_and_resume() {
+                            Err(CliError::SignalRestore(error)) => assert_eq!(error.raw_os_error(), Some(5)),
+                            other => panic!("wrong restore result: {other:?}"),
+                        }
+                    }
+                    assert_eq!(handlers.previous.iter().map(|entry| entry.0).collect::<Vec<_>>(), [3, 18]);
+                    handlers.restore().unwrap();
+                    assert!(handlers.previous.is_empty());
+                }
+                "raise" => {
+                    let mut handlers = SignalHandlers::install().unwrap();
+                    match handlers.suspend_and_resume() {
+                        Err(CliError::SignalSuspend(error)) => assert_eq!(error.raw_os_error(), Some(3)),
+                        other => panic!("wrong suspend result: {other:?}"),
+                    }
+                    assert!(handlers.previous.is_empty());
+                }
+                "control" => {
+                    let mut handlers = SignalHandlers::install().unwrap();
+                    assert_eq!(handlers.previous.len(), 5);
+                    let pid = rustix::process::Pid::from_raw(i32::try_from(std::process::id()).unwrap()).unwrap();
+                    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while super::PENDING_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) != 2 {
+                        assert!(Instant::now() < deadline, "installed handler did not receive SIGINT");
+                        std::thread::yield_now();
+                    }
+                    handlers.restore().unwrap();
+                    assert!(handlers.previous.is_empty());
+                }
+                _ => panic!("unknown mode"),
+            }
+            fs::remove_file(root.join("armed")).unwrap();
+            fs::write(root.join("complete"), b"yes").unwrap();
+            return;
+        }
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        struct OwnedChild(Child, bool);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                if !self.1 {
+                    if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+                        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                    }
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        fn wait(child: &mut OwnedChild) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() { child.1 = true; return status; }
+                assert!(Instant::now() < deadline, "owned child deadline");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let scratch_path = std::env::temp_dir().join(format!("sig-{}", std::process::id()));
+        fs::create_dir(&scratch_path).unwrap();
+        let scratch = Scratch(scratch_path);
+        let library = scratch.0.join("fault.dylib");
+        let mut compiler = OwnedChild(Command::new("cc").args(["-dynamiclib", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/signal_fault.c")).arg("-o").arg(&library)
+            .process_group(0).spawn().unwrap(), false);
+        assert!(wait(&mut compiler).success(), "fixture compile");
+        for (mode, events) in [
+            ("control", ""),
+            ("install", "S1\nI1\nS2!\nS1\n"),
+            ("interrupt", "S1\nI1\nS2\nI2!\nS2\nS1\n"),
+            ("combined", "S1\nI1\nS2!\nS1!\nS1\n"),
+            ("restore", "S1\nI1\nS2\nI2\nS3\nI3\nS15\nI15\nS18\nI18\nS18!\nS15\nS3!\nS2\nS1\nS18\nS3\n"),
+            ("suspend-restore", "S1\nI1\nS2\nI2\nS3\nI3\nS15\nI15\nS18\nI18\nS18!\nS15\nS3!\nS2\nS1\nS18\nS3\n"),
+            ("raise", "S1\nI1\nS2\nI2\nS3\nI3\nS15\nI15\nS18\nI18\nS18\nS15\nS3\nS2\nS1\nR18!\n"),
+        ] {
+            let root = scratch.0.join(mode);
+            fs::create_dir(&root).unwrap();
+            let log = fs::File::create(root.join("log")).unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::signal_handler_native_faults", "--nocapture"])
+                .env(ROOT, &root).env(MODE, mode).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log)).process_group(0);
+            if mode == "control" { command.env_remove("DYLD_INSERT_LIBRARIES"); }
+            else { command.env("DYLD_INSERT_LIBRARIES", &library); }
+            let mut child = OwnedChild(command.spawn().unwrap(), false);
+            let status = wait(&mut child);
+            assert!(status.success(), "{mode}: {status}: {}", fs::read_to_string(root.join("log")).unwrap());
+            assert_eq!(fs::read(root.join("entered")).unwrap(), b"yes");
+            assert_eq!(fs::read(root.join("complete")).unwrap(), b"yes");
+            if !events.is_empty() { assert_eq!(fs::read_to_string(root.join("events")).unwrap(), events, "{mode}"); }
+        }
+    }
+
     #[test]
     fn help_examples_parse_without_running_commands() {
         use super::{COMMANDS, EXEC_EXAMPLE, parse_exec_args, validate_command};
