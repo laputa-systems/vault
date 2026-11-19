@@ -21,7 +21,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
 - macOS cache socket protocol: `src/macos.rs` identity cache tests; Linux keyring assertions can skip when unavailable.
 - Public library API and network endpoints: none; this is a CLI.
-- Performance workload: none; no benchmark or established user-visible performance gate exists.
+- Performance workload: none; no benchmark or established user-visible performance gate exists. Ranked gaps: [TODO-DESLOP.md](TODO-DESLOP.md#report).
 
 ## Invariants
 

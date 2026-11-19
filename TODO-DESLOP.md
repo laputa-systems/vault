@@ -1,9 +1,21 @@
 Prefix: DSLP
-Next: 9
+Next: 12
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
+
+**Bench audit**
+
+No representative performance workload, benchmark harness, or regression gate was found in the tracked project files, Cargo targets, Makefile, scripts, or docs. Ground's test and lint durations measure verification, not user operations. The one-off release-profile binary sizes and prompt-error-path memory observations in `docs/deslop-terminal-echo.md` do not establish distribution size, startup, or normal store performance. No benchmark entrypoint or workload tiers exist; none were run.
+
+Ranked outcomes lacking representative performance evidence, by risk of a regression reaching users:
+
+1. **P2 — retrieval and unlock (DSLP-9):** `vault get` and exec retrieval with a macOS cache socket hit or miss, Secure Enclave unlock cost, and Linux keyring hit or passphrase unlock. Interactive authentication time needs separate accounting from processing.
+2. **P2 — store scaling (DSLP-10):** list and get latency as entry count and secret size grow, including I/O and memory costs.
+3. **P2 — startup and artifact size (DSLP-11):** CLI startup latency and distribution binary size across supported platforms; the existing one-off release comparison is not a continuing baseline.
+
+The risks are unproven, not measured regressions. There are no recorded representative fixtures, correctness or completed-work checks, sample distributions, reference comparisons, host gates, attribution runs, or performance budgets. CPU sampling and filesystem syscall counts are candidate attribution tools, kept separate from timed runs. A future workload needs disposable stores, verified outputs, platform and cache-state prerequisites, recorded host and artifact identity, interleaved baselines, and visible unsupported or interactive cases; completion alone would not establish a performance verdict. Hardware unlock and live Linux keyring performance remain unverified. The smallest next action is to define and measure verified retrieval on a disposable store (DSLP-9).
 
 Dead code (DSLP-5): Rust nightly 1.102.0, all targets on macOS arm64 and Linux arm64 container, default features: `dead_code` and `unreachable_pub` found two unreachable public test helpers, `open_pty` and `launch_binary_with_controlling_tty`; their visibility is now crate-only. `open_pty` is called by `tests/terminal_cli.rs` and macOS `src/main.rs` tests. The launch helper is called by the latter; its single `allow(dead_code)` remains necessary because the terminal integration target imports the same file without calling that helper. Linux test-only `get_secrets_at` is used by storage tests; `identity_cache_timeout` and `parse_key_timeout` serve the keyring expiry test; `KEYCTL_DESCRIBE` serves its permission check. The test-only Secure Enclave `Interaction::Disallowed` is used by the ignored hardware test. Other test helpers are reached by their test targets. The macOS `initialize_store_with` seam is used by production initialization and bootstrap tests. No dead code or dependencies were removed; cargo-machete 0.10.1 found no unused dependencies. No compiler findings remain unsuppressed.
 
@@ -95,6 +107,36 @@ Local branch inventory against `origin/main` at `553fb720`. Tests listed as wort
 - **Problem:** The Linux interoperability test returns early (passes) when rage 0.12.1 is not installed, and the keyring assertions skip when no keyring is available, so CI can report green without exercising either boundary. CI has no macOS lane, and the two hardware authentication tests are #[ignore].
 - **Recommendation:** Install a pinned rage 0.12.1 in the CI image and make the test fail rather than return when CI=true and it is missing; do the same for the keyring path, or record it as an owner-run boundary in Verification.
 - **Fix with:** test-audit
+- **Effort:** S
+
+
+### DSLP-9 · P2 · Secret retrieval latency has no representative measurement
+
+- **Area:** Performance · retrieval
+- **Where:** src/macos.rs:162, src/macos.rs:193, src/linux.rs:202, README.md:59
+- **Problem:** Unproven regression risk: normal get and exec retrieval have no performance workload, so slower cache hits or unlocks can reach users unseen. macOS uses a socket cache or Secure Enclave and Linux uses a keyring or passphrase; authentication interaction must be separated from processing time.
+- **Recommendation:** Measure verified retrieval on disposable stores for macOS cache hit and unlock and Linux keyring hit and passphrase unlock; record host, samples, baseline and completed results, and use platform profilers to attribute regressions.
+- **Fix with:** bench-pyramid
+- **Effort:** M
+
+
+### DSLP-10 · P2 · Store growth has no list or retrieval performance evidence
+
+- **Area:** Performance · scaling
+- **Where:** src/macos.rs:251, src/linux.rs:258, src/macos.rs:162, src/linux.rs:202
+- **Problem:** Unproven regression risk: no representative list or get workload compares store sizes or secret sizes, so a scaling regression can ship without being noticed until users have larger stores.
+- **Recommendation:** Measure successful list and get on disposable stores across representative entry counts and value sizes, verify names and values, and compare interleaved runs against a recorded baseline; use filesystem syscall counts and CPU sampling for attribution.
+- **Fix with:** bench-pyramid
+- **Effort:** M
+
+
+### DSLP-11 · P2 · CLI startup and distribution size have no ongoing performance comparison
+
+- **Area:** Performance · startup
+- **Where:** Makefile:23, Cargo.toml:26, docs/deslop-terminal-echo.md:44
+- **Problem:** Unproven regression risk: a one-off release-profile size comparison is not an ongoing distribution-size or startup measurement, so changes can increase download footprint or delay every invocation unnoticed.
+- **Recommendation:** Record distribution binary size and verified CLI startup latency for representative release builds on supported platforms, with host and baseline and interleaved timing; use process-level CPU sampling if startup regresses.
+- **Fix with:** bench-pyramid
 - **Effort:** S
 
 
