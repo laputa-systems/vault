@@ -790,10 +790,20 @@ fn initialize_store(
     value: &[u8],
     passphrase: SecretString,
 ) -> Result<(), String> {
+    initialize_store_with(data, name, value, passphrase, wrap_identity)
+}
+
+fn initialize_store_with(
+    data: &File,
+    name: &str,
+    value: &[u8],
+    passphrase: SecretString,
+    wrap: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, SecureEnclaveError>,
+) -> Result<(), String> {
     let (stage_name, stage) = create_staging_directory(data)?;
     let value = std::str::from_utf8(value)
         .map_err(|_| "vault: secret is not valid UTF-8".to_owned())?;
-    let result = populate_staging_directory(&stage, name, value, passphrase);
+    let result = populate_staging_directory(&stage, name, value, passphrase, wrap);
     if let Err(primary) = result {
         drop(stage);
         return Err(cleanup_failure(data, &stage_name, primary));
@@ -816,6 +826,7 @@ fn populate_staging_directory(
     name: &str,
     value: &str,
     passphrase: SecretString,
+    wrap: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, SecureEnclaveError>,
 ) -> Result<(), String> {
     let identity = age::x25519::Identity::generate();
     let private_key = identity.to_string();
@@ -828,7 +839,7 @@ fn populate_staging_directory(
     let recipient = identity.to_public();
     let recipient_text = format!("{recipient}\n");
     atomic_write(stage, RECIPIENT_NAME, recipient_text.as_bytes())?;
-    let sidecar = wrap_identity(&private_key_bytes, &identity_binding(&recipient))
+    let sidecar = wrap(&private_key_bytes, &identity_binding(&recipient))
         .map_err(format_secure_enclave_error)?;
     atomic_write(stage, SECURE_ENCLAVE_NAME, &sidecar)?;
 
@@ -1719,6 +1730,88 @@ mod tests {
         assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap(), sidecar);
         fs::write(&path, b"bad header").unwrap();
         assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: Secure Enclave sidecar is corrupt: unsupported or truncated Secure Enclave sidecar");
+    }
+
+    #[test]
+    fn bootstrap_domain_publishes_private_recoverable_store_and_refuses_replacement() {
+        let fixture = TestDir::new();
+        let data = open_data_home(fixture.path(), true).unwrap().unwrap();
+        let passphrase = || SecretString::from("disposable passphrase".to_owned());
+        let wrap = |key: &[u8], binding: &[u8]| {
+            let entries: Vec<_> = fs::read_dir(fixture.path()).unwrap().map(|entry| entry.unwrap().path()).collect();
+            let stage = entries.iter().find(|path| path.file_name().unwrap().to_str().unwrap().starts_with(super::INIT_PREFIX)).unwrap();
+            let encrypted = fs::read(stage.join(super::IDENTITY_NAME)).unwrap();
+            let identity = super::decrypt_identity(&encrypted, passphrase()).unwrap();
+            let recipient = fs::read_to_string(stage.join(super::RECIPIENT_NAME)).unwrap();
+            assert_eq!(recipient, format!("{}\n", identity.to_public()));
+            assert_eq!(key, identity.to_string().expose_secret().as_bytes());
+            assert_eq!(binding, format!("dev.joshuarli.vault\0age-x25519\0{}", identity.to_public()).as_bytes());
+            assert!(!stage.join(super::SECURE_ENCLAVE_NAME).exists());
+            assert!(!stage.join(super::SECRETS_NAME).exists());
+            Ok(framed_sidecar())
+        };
+        super::initialize_store_with(&data, "DUMMY", b"literal disposable value", passphrase(), wrap).unwrap();
+        let root = fixture.path().join(STORE_NAME);
+        let secrets = root.join(super::SECRETS_NAME);
+        let secret = secrets.join("44554d4d59.age");
+        let paths = [root.clone(), secrets.clone(), root.join(super::IDENTITY_NAME), root.join(super::RECIPIENT_NAME), root.join(SECURE_ENCLAVE_NAME), secret.clone()];
+        for (index, path) in paths.iter().enumerate() {
+            let metadata = fs::metadata(path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7777, if index < 2 { 0o700 } else { 0o600 });
+            assert_eq!(metadata.is_dir(), index < 2);
+        }
+        let mut names: Vec<_> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["identity.age", "identity.se", "recipient", "secrets"].map(OsString::from));
+        let names: Vec<_> = fs::read_dir(&secrets).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, [OsString::from("44554d4d59.age")]);
+        let recovery = fs::read(root.join(super::IDENTITY_NAME)).unwrap();
+        let ciphertext = fs::read(&secret).unwrap();
+        assert!(recovery.starts_with(b"age-encryption.org/v1\n"));
+        assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
+        assert_eq!(fs::read(root.join(SECURE_ENCLAVE_NAME)).unwrap(), framed_sidecar());
+        assert!(super::decrypt_identity(&recovery, SecretString::from("wrong".to_owned())).is_err());
+        let identity = super::decrypt_identity(&recovery, passphrase()).unwrap();
+        assert_eq!(fs::read_to_string(root.join(super::RECIPIENT_NAME)).unwrap(), format!("{}\n", identity.to_public()));
+        assert_eq!(super::decrypt_secret(&identity, &ciphertext).unwrap().as_str(), "literal disposable value");
+        let before: Vec<_> = paths[2..].iter().map(|p| fs::read(p).unwrap()).collect();
+        let private_key = identity.to_string();
+        for bytes in &before {
+            assert!(!bytes.windows(b"literal disposable value".len()).any(|window| window == b"literal disposable value"));
+            assert!(!bytes.windows(private_key.expose_secret().len()).any(|window| window == private_key.expose_secret().as_bytes()));
+        }
+        let error = super::initialize_store_with(&data, "DUMMY", b"replacement", passphrase(), wrap).unwrap_err();
+        assert!(error.contains("publish initialized macOS store"), "{error}");
+        assert_eq!(before, paths[2..].iter().map(|p| fs::read(p).unwrap()).collect::<Vec<_>>());
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn bootstrap_domain_wrap_failure_cleans_stage_and_preserves_error() {
+        let fixture = TestDir::new();
+        let data = open_data_home(fixture.path(), true).unwrap().unwrap();
+        let error = super::initialize_store_with(&data, "DUMMY", b"value", SecretString::from("passphrase".to_owned()), |_, _| {
+            Err(super::SecureEnclaveError::Unavailable("fixture refusal".to_owned()))
+        }).unwrap_err();
+        assert_eq!(error, "vault: Secure Enclave is unavailable: fixture refusal");
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 0);
+        let file_path = fixture.path().join("file");
+        let file = fs::File::create(file_path).unwrap();
+        assert!(initialize_store(&file, "DUMMY", b"value", SecretString::from("passphrase".to_owned())).unwrap_err().contains("create initialization directory"));
+    }
+
+    #[test]
+    fn new_store_rejects_empty_recovery_passphrase_before_confirmation() {
+        let test_dir = TestDir::new();
+        let mut calls = 0;
+        let error = set_secret_at(test_dir.path(), "TOKEN", b"value", |prompt| {
+            assert!(matches!(prompt, super::RecoveryPrompt::Create));
+            calls += 1;
+            Ok(SecretString::from(String::new()))
+        }).unwrap_err();
+        assert_eq!(error, "vault: recovery passphrase must not be empty");
+        assert_eq!(calls, 1);
+        assert!(!test_dir.path().join("vault").exists());
     }
 
     #[test]
