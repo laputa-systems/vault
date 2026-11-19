@@ -23,34 +23,37 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 | redundant_clone | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
 | needless_pass_by_value | 4 / 3 | 0 | 0 | 4 / 3 | Reject: ownership and callbacks |
 
-The platform trial [#30](https://github.com/laputa-systems/vault/pull/30)
-at `0671858b` passed the ordinary Linux x86-64 musl, Linux ARM64 musl
-and macOS jobs. The aggregate failed. Fourteen Linux mutation shards
-failed after roughly 20 minutes, and the 13 failed macOS shards
-included incomplete runs. A separate
-[budget receipt](https://github.com/laputa-systems/vault/commit/e8c79312e9fa1faa503b90708ab50b414e720ecf)
-records the change that preserves partial results.
+Tests (DSLP-4): required scope is `src/store.rs` encryption, authentication and size bounds; `src/macos.rs` and `src/linux.rs` identity and bootstrap validation, atomic publication and cleanup; `src/main.rs` passphrase input, signal restoration, CLI limits and exit statuses; and the macOS cache socket admission and protocol. The ordinary suite exercises age format and tampering, recipient matching, terminal echo and signal restoration, input limits, child status and socket requests. `tests/integration.rs` rejects surplus names before storage. Atomic syscall failures and process-crash windows, bootstrap domain, and signal syscall failures have useful witnesses on the unmerged branches below; they are not asserted to run on main.
 
-The ordinary jobs leave Secure Enclave authentication, two-Mac
-recovery and the Linux session keyring unqualified. The recovery
-check requires two independent Secure Enclave Macs, owner
-authentication and a disposable store. The Linux keyring check
-requires a runner with a usable session keyring and confirmation
-that its assertions executed.
+Recorded mutation dispositions are grouped by behavior. The store selection on `e8c79312` records 45 caught and six unviable; the macOS cache/store selection records 69 caught and 29 unviable. These receipts use branch tests and do not establish main's mutation result. The original macOS filesystem run at `35fa554` was incomplete: 102 caught, 65 missed, six unviable, 59 unrun. Follow-up branch tests reconcile the misses as 46 caught and 19 equivalent and the unrun as 49 caught, four equivalent and six unviable. Equivalent groups include disjoint open-flag OR/XOR, redundant filename validation and newline rejection by age parsing. Unviable replacements do not provide evidence. Private temporary-name spelling and incidental diagnostics, including the shard 9 size-display arithmetic, need no further tests. Linux shard 13's surplus-name survivor is covered by the ordinary CLI regression; the terminal-flag OR/XOR survivor remains unresolved pending a Linux-specific equivalence check. Signal setup and restoration failures have branch witnesses; three historical terminal hangs remain incomplete. Exact trials are in `git show deslop/cli-oracle:docs/deslop-filesystem.md`, `git show deslop/signal-failure-tests:docs/deslop-signal-tests.md` and `git show deslop/platform-ci:docs/deslop-platform-ci.md`.
+
+The advisory platform matrix in [draft #30](https://github.com/laputa-systems/vault/pull/30) at `0671858b` passed ordinary macOS and both Linux musl jobs, but the aggregate mutation run failed, including budget-exhausted and incomplete shards. No wide matrix was rerun for this closure. No new mutation trial was run (0 runner-minutes). A hand fault changed `require_exact_name` from `> 1` to `< 1`; the CLI regression failed, and the fault was restored. Cargo reported 62 seconds building and 0.27 seconds running that fault trial. The remaining unrun shards and unconfirmed timeouts are incomplete, not passes. Hardware authentication, live Linux keyring assertions, two-Mac recovery, physical power-loss durability and remote CI remain environment items. DSLP-6 remains open for silently skipped tool-dependent checks.
+
+Local branch inventory against `origin/main` at `553fb720`. Tests listed as worth landing are candidates for separate PRs; their historical receipts do not qualify main.
+
+| Branch | Head | Status | Reason |
+| --- | --- | --- | --- |
+| deslop/acc-socket | 0e72b211 | already merged | Socket fixture is in main. |
+| deslop/atomic-fault-windows | 6856af34 | contains unlanded tests worth landing | `atomic_file_native_fault_windows` exercises syscall failures and process crashes. |
+| deslop/atomic-file-tests | 7db74f65 | contains unlanded tests worth landing | `atomic_file_replacement_and_admission`, `atomic_file_names_and_cleanup` and `atomic_file_temporary_names_flags_and_collisions` protect atomic publication. |
+| deslop/bootstrap-domain-tests | f655ec01 | contains unlanded tests worth landing | `bootstrap_domain_publishes_private_recoverable_store_and_refuses_replacement` and `bootstrap_domain_wrap_failure_cleans_stage_and_preserves_error` protect initialization. |
+| deslop/cli-oracle | 94c2210b | contains unlanded tests worth landing | `cache_daemon_rejects_an_empty_seed` and `cache_daemon_rejects_either_missing_seed_field` protect seed admission; it also inherits crash and terminal witnesses. |
+| deslop/identity-validation-tests | f82546e1 | contains unlanded tests worth landing | `identity_input_identity_bytes` and `identity_input_sidecar_read_and_validation` exercise malformed identity and sidecar input. |
+| deslop/lock-mode-tests | 2c0035b6 | contains unlanded tests worth landing | `lock_mode_descriptor_and_admission` and `lock_mode_directory_and_socket_repair` exercise admission and permissions. |
+| deslop/passphrase-error-tests | c68d9ccd | contains unlanded tests worth landing | `read_passphrase_owned_terminal_cleanup` exercises real PTY cleanup and error propagation. |
+| deslop/passphrase-main | 0e72b211 | already merged | Same head as the merged socket branch. |
+| deslop/platform-ci | e8c79312 | contains unlanded tests worth landing | Inherits `atomic_file_native_fault_windows` and `signal_handler_native_faults`; the advisory matrix is paused. |
+| deslop/signal-contracts | bf3dcd9b | contains unlanded tests worth landing | `read_passphrase_owned_terminal_cleanup` adds terminal I/O fault witnesses. |
+| deslop/signal-failure-tests | e939a06d | contains unlanded tests worth landing | `signal_handler_native_faults` exercises installation and restoration failures. |
+| deslop/staging-list-tests | 9dbf993c | contains unlanded tests worth landing | `staging_list_creation_and_cleanup` and `staging_list_cleanup_refuses_nested_directories` protect cleanup admission. |
+| deslop/tests-close | 553fb720 | superseded by main | At admission its head is identical to main. |
+| deslop/tests-qualification | 63b25c74 | contains unlanded tests worth landing | Inherits `atomic_file_native_fault_windows` and records native coverage limits. |
 
 ## Tickets
 
 
 
 
-### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
-
-- **Area:** deslop · tests
-- **Where:** test suites and CI
-- **Problem:** Draft #30 supplies platform and store mutation evidence, but the union failed and the required cost and controls are unqualified.
-- **Recommendation:** Account for the remaining Linux and macOS identities at their actual job budgets. Qualify the executed controls and record the separate hardware and keyring evidence.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-5 · P2 · Dead code: tools and debloat
 
