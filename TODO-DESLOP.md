@@ -23,13 +23,14 @@ Each fault below was injected into production code, produced a failing focused t
 | Identity input | Reject invalid Secure Enclave identity bytes and sidecars | Skip sidecar validation |
 | Store formats | Reject mismatched recipients and malformed identity formats | Accept mismatched recipients |
 | Decrypted sizes | Accept exact bounds and reject oversized values | Reject values at the exact secret limit |
+| Linux ciphertext files | Accept exact file limits and reject one extra byte | Reject files at the exact limit |
 | Signal failures | Report setup and restoration failures and retry failed restoration | Discard handlers whose restoration failed |
 | Passphrase terminal I/O | Restore terminal and signals and report open, prompt, input and combined errors | Skip explicit signal restoration |
 | Uninitialized store | List, purge and lock without creating a store | Create the data home during listing |
 
-Dropped: generated temporary-name spelling, descriptor flag and fake-metadata assertions that track implementation details; duplicate path, codec and cleanup checks covered by the wider tests above or existing main tests; mutation selection, shard budgets, CI and qualification receipts because wide mutation runs are paused. The non-UTF-8 filename listing case is unavailable on this macOS filesystem, while non-UTF-8 data-home resolution is covered. Linux ciphertext-file exact-boundary and native cache startup candidates remain unported and unverified here; hardware authentication and physical power-loss durability remain unverified.
+Dropped: generated temporary-name spelling, descriptor flag and fake-metadata assertions that track implementation details; duplicate path, codec and cleanup checks covered by the wider tests above or existing main tests; mutation selection, shard budgets, CI and qualification receipts because wide mutation runs are paused. The non-UTF-8 filename listing case is unavailable on this macOS filesystem, while non-UTF-8 data-home resolution is covered. The standalone native cache startup candidate remains unported and unverified here; hardware authentication and physical power-loss durability remain unverified.
 
-Fully superseded stranded branches: none established. Their histories also contain the unported Linux ciphertext and cache candidates, so retain them until those are dispositioned; do not infer safe deletion from these ports alone.
+Fully superseded stranded branches: none established. Their histories also contain the unported native cache startup candidate, so retain them until it is dispositioned; do not infer safe deletion from these ports alone.
 
 Ground: base `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`; macOS arm64, Rust nightly 1.102.0, `cpu-guard --cores 6`: fresh-target `make test` 15.23s, warm 4.43s, `make lint` 9.80s; all exit 0. Tests: 56 passed, two hardware authentication tests ignored. No vendored source trees found. No performance workload exists; no established user-visible performance gate. No runtime code changed.
 
