@@ -294,3 +294,54 @@ fn empty_stores_list_purge_and_lock_without_initializing() {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn listing_rejects_untrusted_ancestors_without_reading_the_store() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct CacheHome(std::path::PathBuf);
+    impl Drop for CacheHome { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let home = CacheHome(std::env::temp_dir().join(format!("vault-fs-{}", std::process::id())));
+    std::fs::create_dir(&home.0).unwrap();
+    std::fs::set_permissions(&home.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let parent = home.0.join("parent");
+    let data = parent.join("data");
+    let secrets = data.join("vault/secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    for directory in [&parent, &data, &data.join("vault"), &secrets] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(secrets.join("544f4b454e.age"), b"listing fixture").unwrap();
+    let run = |path: &std::path::Path| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+        command.env_clear();
+        command.env("HOME", &home.0).env("XDG_DATA_HOME", path).arg("ls");
+        bounded_filesystem_command(command)
+    };
+    let listed = run(&data);
+    assert_eq!(listed.status.code(), Some(0));
+    assert_eq!(listed.stdout, b"TOKEN\n");
+    assert!(listed.stderr.is_empty());
+
+    for permissions in [0o777, 0o770] {
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(permissions)).unwrap();
+        let refused = run(&data);
+        assert_eq!(refused.status.code(), Some(1), "mode {permissions:o}");
+        assert!(refused.stdout.is_empty());
+        assert_eq!(refused.stderr, b"vault: application support parent is writable by other users\n");
+    }
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let link = home.0.join("linked");
+    std::os::unix::fs::symlink(&data, &link).unwrap();
+    let refused = run(&link);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    assert!(refused.stderr.starts_with(b"vault: open application support directory failed: "));
+    let restored = run(&data);
+    assert_eq!(restored.status.code(), Some(0));
+    assert_eq!(restored.stdout, b"TOKEN\n");
+    assert!(restored.stderr.is_empty());
+    assert_eq!(std::fs::read(secrets.join("544f4b454e.age")).unwrap(), b"listing fixture");
+}
+
