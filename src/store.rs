@@ -222,4 +222,22 @@ mod tests {
     }
 
 
+    #[test]
+    fn decrypted_values_enforce_size_limits() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let limit = 16 * 1024 * 1024;
+        let exact = vec![b'a'; limit];
+        let encrypted = encrypt_secret(&recipient, &exact).unwrap();
+        assert_eq!(decrypt_secret(&identity, &encrypted).unwrap().len(), limit);
+        let oversized = vec![b'a'; limit + 1];
+        let encrypted = encrypt_secret(&recipient, &oversized).unwrap();
+        assert_eq!(decrypt_secret(&identity, &encrypted).unwrap_err(), "decrypted secret exceeds the size limit");
+        let passphrase = || SecretString::from("disposable test passphrase".to_owned());
+        let encrypted = encrypt_identity(&vec![b'a'; 1024], passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity is not a valid age X25519 identity");
+        let encrypted = encrypt_identity(&vec![b'a'; 1025], passphrase()).unwrap();
+        assert_eq!(decrypt_identity(&encrypted, passphrase()).err().unwrap(), "vault: decrypted identity exceeds the maximum size");
+    }
+
 }
