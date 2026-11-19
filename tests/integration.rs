@@ -246,3 +246,51 @@ fn exec_spawn_failure_is_reported_without_environment_values() {
     assert!(stderr.contains("failed to spawn command"), "stderr: {stderr}");
     assert!(!stderr.contains("do-not-print"), "stderr: {stderr}");
 }
+
+#[cfg(target_os = "macos")]
+fn bounded_filesystem_command(mut command: Command) -> std::process::Output {
+    use std::time::{Duration, Instant};
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let mut child = ChildGuard(Some(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "filesystem command exceeded its deadline");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    child.0.take().unwrap().wait_with_output().unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn empty_stores_list_purge_and_lock_without_initializing() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Home(std::path::PathBuf);
+    impl Drop for Home {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    let home = Home(std::env::temp_dir().join(format!("vault-empty-{}", std::process::id())));
+    std::fs::create_dir(&home.0).unwrap();
+    std::fs::set_permissions(&home.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for exists in [false, true] {
+        let data = home.0.join(if exists { "existing" } else { "absent" });
+        if exists { std::fs::create_dir(&data).unwrap(); }
+        for (name, expected) in [("ls", b"".as_slice()), ("lock", b"identity cache already clear\n".as_slice()), ("purge", b"nothing to purge\n".as_slice())] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+            command.env("HOME", &home.0).env("XDG_DATA_HOME", &data).arg(name);
+            let output = bounded_filesystem_command(command);
+            assert_eq!(output.status.code(), Some(0), "{exists} {name}: {:?}", output.stderr);
+            assert_eq!(output.stdout, expected, "{exists} {name}");
+            assert!(output.stderr.is_empty(), "{exists} {name}");
+            assert_eq!(data.exists(), exists, "{exists} {name}");
+            assert!(!data.join("vault").exists(), "{exists} {name}");
+        }
+    }
+}
