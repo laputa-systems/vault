@@ -11,7 +11,7 @@ test:
 
 test-ci:
 	docker run --rm --init --platform "$(PLATFORM)" -e CI -v "$(CURDIR):/vault" -w /vault "$(IMAGE)" sh -ec '\
-		echo "CI skips Linux session keyring test: owner-run boundary (container keyctl unavailable)" >&2; \
+		echo "CI skips identity_cache_permissions_expiry_refresh_and_revocation_are_enforced: owner-run boundary (container keyctl unavailable)" >&2; \
 		cargo test -- --test-threads=1 --skip identity_cache_permissions_expiry_refresh_and_revocation_are_enforced; \
 		output=$$(cargo test --test terminal_cli pinned_rage_interoperates_with_vault_age_files -- --nocapture 2>&1) || { echo "$$output"; exit 1; }; \
 		echo "$$output"; \
