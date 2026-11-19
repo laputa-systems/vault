@@ -11,9 +11,9 @@ No representative performance workload, benchmark harness, or regression gate wa
 
 Ranked outcomes lacking representative performance evidence, by risk of a regression reaching users:
 
-1. **P2 — retrieval and unlock (DSLP-9):** `vault get` and exec retrieval with a macOS cache socket hit or miss, Secure Enclave unlock cost, and Linux keyring hit or passphrase unlock. Interactive authentication time needs separate accounting from processing.
-2. **P2 — store scaling (DSLP-10):** list and get latency as entry count and secret size grow, including I/O and memory costs.
-3. **P2 — startup and artifact size (DSLP-11):** CLI startup latency and distribution binary size across supported platforms; the existing one-off release comparison is not a continuing baseline.
+1. **P3 — retrieval and unlock (DSLP-9):** `vault get` and exec retrieval with a macOS cache socket hit or miss, Secure Enclave unlock cost, and Linux keyring hit or passphrase unlock. Interactive authentication time needs separate accounting from processing.
+2. **P3 — store scaling (DSLP-10):** list and get latency as entry count and secret size grow, including I/O and memory costs.
+3. **P3 — startup and artifact size (DSLP-11):** CLI startup latency and distribution binary size across supported platforms; the existing one-off release comparison is not a continuing baseline.
 
 The risks are unproven, not measured regressions. There are no recorded representative fixtures, correctness or completed-work checks, sample distributions, reference comparisons, host gates, attribution runs, or performance budgets. CPU sampling and filesystem syscall counts are candidate attribution tools, kept separate from timed runs. A future workload needs disposable stores, verified outputs, platform and cache-state prerequisites, recorded host and artifact identity, interleaved baselines, and visible unsupported or interactive cases; completion alone would not establish a performance verdict. Hardware unlock and live Linux keyring performance remain unverified. The smallest next action is to define and measure verified retrieval on a disposable store (DSLP-9).
 
