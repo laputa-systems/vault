@@ -344,4 +344,3 @@ fn listing_rejects_untrusted_ancestors_without_reading_the_store() {
     assert!(restored.stderr.is_empty());
     assert_eq!(std::fs::read(secrets.join("544f4b454e.age")).unwrap(), b"listing fixture");
 }
-
