@@ -790,10 +790,20 @@ fn initialize_store(
     value: &[u8],
     passphrase: SecretString,
 ) -> Result<(), String> {
+    initialize_store_with(data, name, value, passphrase, wrap_identity)
+}
+
+fn initialize_store_with(
+    data: &File,
+    name: &str,
+    value: &[u8],
+    passphrase: SecretString,
+    wrap: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, SecureEnclaveError>,
+) -> Result<(), String> {
     let (stage_name, stage) = create_staging_directory(data)?;
     let value = std::str::from_utf8(value)
         .map_err(|_| "vault: secret is not valid UTF-8".to_owned())?;
-    let result = populate_staging_directory(&stage, name, value, passphrase);
+    let result = populate_staging_directory(&stage, name, value, passphrase, wrap);
     if let Err(primary) = result {
         drop(stage);
         return Err(cleanup_failure(data, &stage_name, primary));
@@ -816,6 +826,7 @@ fn populate_staging_directory(
     name: &str,
     value: &str,
     passphrase: SecretString,
+    wrap: impl Fn(&[u8], &[u8]) -> Result<Vec<u8>, SecureEnclaveError>,
 ) -> Result<(), String> {
     let identity = age::x25519::Identity::generate();
     let private_key = identity.to_string();
@@ -828,7 +839,7 @@ fn populate_staging_directory(
     let recipient = identity.to_public();
     let recipient_text = format!("{recipient}\n");
     atomic_write(stage, RECIPIENT_NAME, recipient_text.as_bytes())?;
-    let sidecar = wrap_identity(&private_key_bytes, &identity_binding(&recipient))
+    let sidecar = wrap(&private_key_bytes, &identity_binding(&recipient))
         .map_err(format_secure_enclave_error)?;
     atomic_write(stage, SECURE_ENCLAVE_NAME, &sidecar)?;
 
@@ -1363,7 +1374,7 @@ fn io_error(operation: &str, source: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_NAME_BYTES, SECURE_ENCLAVE_NAME, STORE_NAME, cleanup_failure,
+        SECURE_ENCLAVE_NAME, STORE_NAME, cleanup_failure,
         create_staging_directory, data_home_from, decode_secret_filename, initialize_store,
         open_data_home, open_store, read_age_values, recover_at,
         secret_filename, set_secret_at, validate_store_name,
@@ -1417,28 +1428,479 @@ mod tests {
     }
 
     #[test]
+    fn atomic_file_native_fault_windows() {
+        use super::io_error;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::{Child, Command};
+        use std::time::{Duration, Instant};
+
+        struct OwnedChild(Child, bool);
+        impl OwnedChild {
+            fn kill_group(&self) {
+                let pid = rustix::process::Pid::from_raw(i32::try_from(self.0.id()).unwrap()).unwrap();
+                assert_ne!(pid.as_raw_pid(), 1);
+                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL).unwrap();
+            }
+        }
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                if !self.1 {
+                    let pid = rustix::process::Pid::from_raw(i32::try_from(self.0.id()).unwrap()).unwrap();
+                    if pid.as_raw_pid() != 1 { let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL); }
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        fn wait(child: &mut OwnedChild) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() { child.1 = true; return status; }
+                assert!(Instant::now() < deadline, "owned process exceeded five seconds");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        const ROOT: &str = "VAULT_ATOMIC_ROOT";
+        const MODE: &str = "VAULT_ATOMIC_MODE";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = PathBuf::from(root);
+            let mode = std::env::var(MODE).unwrap();
+            fs::write(root.join(".bootstrap"), b"ready").unwrap();
+            let dir = fs::File::open(&root).unwrap();
+            let result = super::atomic_write(&dir, "recipient", b"new-value");
+            let io = rustix::io::Errno::IO;
+            match mode.as_str() {
+                "control" => assert_eq!(result, Ok(())),
+                "write" => assert_eq!(result.unwrap_err(), io_error("write recipient", io)),
+                "file-sync" => assert_eq!(result.unwrap_err(), io_error("sync recipient", io)),
+                "rename" => assert_eq!(result.unwrap_err(), io_error("replace recipient", io)),
+                "dir-sync" => assert_eq!(result.unwrap_err(), io_error("sync containing directory", io)),
+                "cleanup" => assert_eq!(result.unwrap_err(), format!("{}; temporary file cleanup failed: {}", io_error("write recipient", io), rustix::io::Errno::ACCESS)),
+                _ => panic!("unexpected completion for {mode}"),
+            }
+            fs::write(root.join(".complete"), b"done").unwrap();
+            return;
+        }
+        let scratch = TestDir::new();
+        let library = scratch.path().join("atomic_fault.dylib");
+        let mut compiler = OwnedChild(Command::new("cc")
+            .args(["-dynamiclib", "-Wall", "-Wextra", "-Werror"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/atomic_fault.c"))
+            .arg("-o").arg(&library).process_group(0).spawn().unwrap(), false);
+        assert!(wait(&mut compiler).success(), "compile fault library");
+        for (mode, event, expected) in [
+            ("control", "", b"new-value".as_slice()),
+            ("write", "W", b"old-value".as_slice()),
+            ("file-sync", "F", b"old-value".as_slice()),
+            ("rename", "R", b"old-value".as_slice()),
+            ("dir-sync", "D", b"new-value".as_slice()),
+            ("cleanup", "WU", b"old-value".as_slice()),
+            ("kill-file", "S", b"old-value".as_slice()),
+            ("kill-rename", "N", b"new-value".as_slice()),
+        ] {
+            let root = scratch.path().join(mode);
+            fs::create_dir(&root).unwrap();
+            let root = fs::canonicalize(root).unwrap();
+            fs::write(root.join("recipient"), b"old-value").unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "macos::tests::atomic_file_native_fault_windows"])
+                .env(ROOT, &root).env(MODE, mode).process_group(0);
+            if mode == "control" { command.env_remove("DYLD_INSERT_LIBRARIES"); }
+            else { command.env("DYLD_INSERT_LIBRARIES", &library); }
+            let mut child = OwnedChild(command.spawn().unwrap(), false);
+            if mode.starts_with("kill-") {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while fs::read(root.join(".event")).ok().as_deref() != Some(event.as_bytes()) {
+                    if let Some(status) = child.0.try_wait().unwrap() {
+                        child.1 = true;
+                        panic!("{mode}: child exited before event: {status}");
+                    }
+                    assert!(Instant::now() < deadline, "{mode}: missing injected event");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                child.kill_group();
+                assert_eq!(wait(&mut child).signal(), Some(9));
+            } else {
+                assert!(wait(&mut child).success(), "{mode}: child failed");
+                assert_eq!(fs::read(root.join(".complete")).unwrap(), b"done");
+            }
+            assert_eq!(fs::read(root.join(".bootstrap")).unwrap(), b"ready", "{mode}");
+            if !event.is_empty() { assert_eq!(fs::read(root.join(".event")).unwrap(), event.as_bytes(), "{mode}"); }
+            assert_eq!(fs::read(root.join("recipient")).unwrap(), expected, "{mode}");
+            let mut names: Vec<_> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+            names.sort();
+            let temps: Vec<_> = names.iter().filter(|n| n.starts_with(".tmp-")).cloned().collect();
+            assert_eq!(temps.len(), usize::from(mode == "cleanup" || mode == "kill-file"), "{mode}: {names:?}");
+            if let Some(temp) = temps.first() {
+                assert_eq!(fs::read(root.join(temp)).unwrap(), if mode == "cleanup" { b"".as_slice() } else { b"new-value".as_slice() });
+            }
+            let mut expected_names = vec![".bootstrap".to_string(), "recipient".to_string()];
+            if !event.is_empty() { expected_names.push(".event".to_string()); }
+            if !mode.starts_with("kill-") { expected_names.push(".complete".to_string()); }
+            expected_names.extend(temps);
+            expected_names.sort();
+            assert_eq!(names, expected_names, "{mode}");
+            if mode.starts_with("kill-") {
+                let dir = fs::File::open(&root).unwrap();
+                super::atomic_write(&dir, "recipient", b"new-value").unwrap();
+                assert_eq!(fs::read(root.join("recipient")).unwrap(), b"new-value");
+                let mut after: Vec<_> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+                after.sort();
+                assert_eq!(after, names, "{mode}: retry changed residue");
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_file_replacement_and_admission() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let path = fixture.path().join("recipient");
+        super::atomic_write(&dir, "recipient", b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        super::atomic_write(&dir, "recipient", b"replacement").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+        fs::hard_link(&path, fixture.path().join("hard")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "recipient", b"bad").unwrap_err(), "vault: recipient has an unexpected hard link");
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&path).unwrap().ino(), fs::metadata(fixture.path().join("hard")).unwrap().ino());
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        symlink("recipient", fixture.path().join("link")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "link", b"bad").unwrap_err(), "vault: link is not a regular file");
+        assert_eq!(fs::read_link(fixture.path().join("link")).unwrap(), std::path::Path::new("recipient"));
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "directory", b"bad").unwrap_err(), "vault: directory is not a regular file");
+        assert_eq!(fs::read_dir(fixture.path().join("directory")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn staging_list_names_and_enumeration() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        for name in ["7a.age", "41.age", "c3a9.age", "junk", "4G.age", "414.age"] {
+            fs::write(fixture.path().join(name), b"dummy").unwrap();
+        }
+        fs::create_dir(fixture.path().join("42.age")).unwrap();
+        fs::write(fixture.path().join("sentinel"), b"unchanged").unwrap();
+        symlink("sentinel", fixture.path().join("4c.age")).unwrap();
+        let invalid = OsString::from_vec(vec![0xff]);
+        let non_utf8 = match fs::write(fixture.path().join(&invalid), b"dummy") {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::ILSEQ.raw_os_error()) => {
+                eprintln!("non-UTF-8 filename case unrun: {error}");
+                false
+            }
+            Err(error) => panic!("create non-UTF-8 filename: {error}"),
+        };
+        let mut actual: Vec<_> = super::directory_names(&dir).unwrap().into_iter().map(|s| s.into_bytes()).collect();
+        actual.sort();
+        let mut expected: Vec<Vec<u8>> = ["7a.age", "41.age", "c3a9.age", "junk", "4G.age", "414.age", "42.age", "sentinel", "4c.age"].iter().map(|s| s.as_bytes().to_vec()).collect();
+        if non_utf8 { expected.push(vec![0xff]); }
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert_eq!(super::managed_names(&dir, false).unwrap(), ["A", "z", "é"]);
+        assert_eq!(super::managed_names(&dir, true).unwrap(), ["A", "L", "z", "é"]);
+        let file = fs::File::open(fixture.path().join("sentinel")).unwrap();
+        assert!(super::directory_names(&file).unwrap_err().starts_with("vault: read directory"));
+        assert!(super::managed_names(&file, false).is_err());
+    }
+
+    #[test]
+    fn staging_list_cleanup_refuses_nested_directories() {
+        let fixture = TestDir::new();
+        let data = fs::File::open(fixture.path()).unwrap();
+        fs::create_dir(fixture.path().join("stage")).unwrap();
+        fs::create_dir(fixture.path().join("stage/secrets")).unwrap();
+        fs::create_dir(fixture.path().join("stage/secrets/nested")).unwrap();
+        fs::write(fixture.path().join("stage/secrets/nested/sentinel"), b"unchanged").unwrap();
+        let error = cleanup_failure(&data, "stage", "primary".into());
+        assert_eq!(error, "primary; initialization cleanup failed: vault: unexpected nested directory in staged secret");
+        assert_eq!(fs::read(fixture.path().join("stage/secrets/nested/sentinel")).unwrap(), b"unchanged");
+        fs::remove_dir_all(fixture.path().join("stage/secrets")).unwrap();
+        fs::write(fixture.path().join("stage/secrets"), b"dummy").unwrap();
+        assert_eq!(super::remove_staging_directory(&data, "stage").unwrap_err(), "vault: staged secrets path is not a directory");
+        fs::remove_file(fixture.path().join("stage/secrets")).unwrap();
+        fs::create_dir(fixture.path().join("stage/nested")).unwrap();
+        assert_eq!(super::remove_staging_directory(&data, "stage").unwrap_err(), "vault: unexpected nested directory in staged initialization file");
+        assert!(fixture.path().join("stage/nested").is_dir());
+        fs::remove_dir(fixture.path().join("stage/nested")).unwrap();
+        super::remove_staging_directory(&data, "stage").unwrap();
+        let error = cleanup_failure(&data, "missing", "primary".into());
+        assert!(error.starts_with("primary; initialization cleanup failed: vault:"));
+    }
+
+    #[test]
+    fn lock_mode_descriptor_and_admission() {
+        use super::io_error;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::fs::symlink;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let path = fixture.path().join(".vault.lock");
+        let mut lock = super::open_lock_file(&dir).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert!(rustix::io::fcntl_getfd(&lock).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        let flags = rustix::fs::fcntl_getfl(&lock).unwrap();
+        assert!(flags.contains(rustix::fs::OFlags::NONBLOCK));
+        assert!(flags.contains(rustix::fs::OFlags::RDWR));
+        lock.write_all(b"original").unwrap();
+        drop(lock);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        let mut lock = super::open_lock_file(&dir).unwrap();
+        let mut bytes = Vec::new();
+        lock.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original");
+        lock.seek(SeekFrom::End(0)).unwrap();
+        lock.write_all(b"!").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"original!");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        drop(lock);
+        fs::hard_link(&path, fixture.path().join("hard")).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), "vault: macOS store lock has an unexpected hard link");
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        assert!(super::open_lock_file(&dir).is_ok());
+        fs::remove_file(&path).unwrap();
+        symlink("missing", &path).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), io_error("open macOS store lock", rustix::io::Errno::LOOP));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(super::open_lock_file(&dir).unwrap_err(), io_error("open macOS store lock", rustix::io::Errno::ISDIR));
+        fs::remove_dir(&path).unwrap();
+        assert!(super::open_lock_file(&dir).is_ok());
+    }
+
+    #[test]
+    fn private_file_reads_and_repairs_owned_files() {
+        use super::read_private_file;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("value"), b"abcd").unwrap();
+        fs::set_permissions(fixture.path().join("value"), fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 4).unwrap(), b"abcd");
+        assert_eq!(fs::metadata(fixture.path().join("value")).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap_err(), "vault: value exceeds the maximum file size");
+        fs::write(fixture.path().join("empty"), b"").unwrap();
+        assert_eq!(read_private_file(&dir, "empty", 0).unwrap(), b"");
+        assert_eq!(read_private_file(&dir, "missing", 4).unwrap_err(), "vault: missing: not found");
+    }
+
+    #[test]
+    fn private_file_rejects_links_and_nonregular_files() {
+        use super::{io_error, read_private_file};
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("value"), b"yes").unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap(), b"yes");
+        std::os::unix::fs::symlink("value", fixture.path().join("link")).unwrap();
+        assert_eq!(read_private_file(&dir, "link", 3).unwrap_err(), io_error("open link", rustix::io::Errno::LOOP));
+        fs::hard_link(fixture.path().join("value"), fixture.path().join("hard")).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap_err(), "vault: value has an unexpected hard link");
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap(), b"yes");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        assert_eq!(read_private_file(&dir, "directory", 3).unwrap_err(), "vault: directory is not a regular file");
+    }
+
+    #[test]
+    fn identity_input_identity_bytes() {
+        use zeroize::Zeroizing;
+        const IDENTITY: &str = "AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33";
+        let parsed = super::identity_from_bytes(Zeroizing::new(IDENTITY.as_bytes().to_vec())).unwrap();
+        assert_eq!(parsed.to_string().expose_secret(), IDENTITY);
+        for bytes in [b"malformed".to_vec(), vec![0xff], format!("{IDENTITY}\r").into_bytes(), format!("{IDENTITY}\n").into_bytes(), format!("{IDENTITY}\r\n").into_bytes()] {
+            assert_eq!(super::identity_from_bytes(Zeroizing::new(bytes)).err().unwrap(), "vault: Secure Enclave returned an invalid age identity");
+        }
+    }
+
+    #[test]
+    fn identity_input_sidecar_read_and_validation() {
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: cannot read Secure Enclave identity: vault: identity.se: not found");
+        let path = fixture.path().join(SECURE_ENCLAVE_NAME);
+        let sidecar = framed_sidecar();
+        fs::write(&path, &sidecar).unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap(), sidecar);
+        fs::write(&path, b"bad header").unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: Secure Enclave sidecar is corrupt: unsupported or truncated Secure Enclave sidecar");
+    }
+
+    #[test]
+    fn bootstrap_domain_publishes_private_recoverable_store_and_refuses_replacement() {
+        let fixture = TestDir::new();
+        let data = open_data_home(fixture.path(), true).unwrap().unwrap();
+        let passphrase = || SecretString::from("disposable passphrase".to_owned());
+        let wrap = |key: &[u8], binding: &[u8]| {
+            let entries: Vec<_> = fs::read_dir(fixture.path()).unwrap().map(|entry| entry.unwrap().path()).collect();
+            let stage = entries.iter().find(|path| path.file_name().unwrap().to_str().unwrap().starts_with(super::INIT_PREFIX)).unwrap();
+            let encrypted = fs::read(stage.join(super::IDENTITY_NAME)).unwrap();
+            let identity = super::decrypt_identity(&encrypted, passphrase()).unwrap();
+            let recipient = fs::read_to_string(stage.join(super::RECIPIENT_NAME)).unwrap();
+            assert_eq!(recipient, format!("{}\n", identity.to_public()));
+            assert_eq!(key, identity.to_string().expose_secret().as_bytes());
+            assert_eq!(binding, format!("dev.joshuarli.vault\0age-x25519\0{}", identity.to_public()).as_bytes());
+            assert!(!stage.join(super::SECURE_ENCLAVE_NAME).exists());
+            assert!(!stage.join(super::SECRETS_NAME).exists());
+            Ok(framed_sidecar())
+        };
+        super::initialize_store_with(&data, "DUMMY", b"literal disposable value", passphrase(), wrap).unwrap();
+        let root = fixture.path().join(STORE_NAME);
+        let secrets = root.join(super::SECRETS_NAME);
+        let secret = secrets.join("44554d4d59.age");
+        let paths = [root.clone(), secrets.clone(), root.join(super::IDENTITY_NAME), root.join(super::RECIPIENT_NAME), root.join(SECURE_ENCLAVE_NAME), secret.clone()];
+        for (index, path) in paths.iter().enumerate() {
+            let metadata = fs::metadata(path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7777, if index < 2 { 0o700 } else { 0o600 });
+            assert_eq!(metadata.is_dir(), index < 2);
+        }
+        let mut names: Vec<_> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["identity.age", "identity.se", "recipient", "secrets"].map(OsString::from));
+        let names: Vec<_> = fs::read_dir(&secrets).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, [OsString::from("44554d4d59.age")]);
+        let recovery = fs::read(root.join(super::IDENTITY_NAME)).unwrap();
+        let ciphertext = fs::read(&secret).unwrap();
+        assert!(recovery.starts_with(b"age-encryption.org/v1\n"));
+        assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
+        assert_eq!(fs::read(root.join(SECURE_ENCLAVE_NAME)).unwrap(), framed_sidecar());
+        assert!(super::decrypt_identity(&recovery, SecretString::from("wrong".to_owned())).is_err());
+        let identity = super::decrypt_identity(&recovery, passphrase()).unwrap();
+        assert_eq!(fs::read_to_string(root.join(super::RECIPIENT_NAME)).unwrap(), format!("{}\n", identity.to_public()));
+        assert_eq!(super::decrypt_secret(&identity, &ciphertext).unwrap().as_str(), "literal disposable value");
+        let before: Vec<_> = paths[2..].iter().map(|p| fs::read(p).unwrap()).collect();
+        let private_key = identity.to_string();
+        for bytes in &before {
+            assert!(!bytes.windows(b"literal disposable value".len()).any(|window| window == b"literal disposable value"));
+            assert!(!bytes.windows(private_key.expose_secret().len()).any(|window| window == private_key.expose_secret().as_bytes()));
+        }
+        let error = super::initialize_store_with(&data, "DUMMY", b"replacement", passphrase(), wrap).unwrap_err();
+        assert!(error.contains("publish initialized macOS store"), "{error}");
+        assert_eq!(before, paths[2..].iter().map(|p| fs::read(p).unwrap()).collect::<Vec<_>>());
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn bootstrap_domain_wrap_failure_cleans_stage_and_preserves_error() {
+        let fixture = TestDir::new();
+        let data = open_data_home(fixture.path(), true).unwrap().unwrap();
+        let error = super::initialize_store_with(&data, "DUMMY", b"value", SecretString::from("passphrase".to_owned()), |_, _| {
+            Err(super::SecureEnclaveError::Unavailable("fixture refusal".to_owned()))
+        }).unwrap_err();
+        assert_eq!(error, "vault: Secure Enclave is unavailable: fixture refusal");
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 0);
+        let file_path = fixture.path().join("file");
+        let file = fs::File::create(file_path).unwrap();
+        assert!(initialize_store(&file, "DUMMY", b"value", SecretString::from("passphrase".to_owned())).unwrap_err().contains("create initialization directory"));
+    }
+
+    #[test]
+    fn new_store_rejects_empty_recovery_passphrase_before_confirmation() {
+        let test_dir = TestDir::new();
+        let mut calls = 0;
+        let error = set_secret_at(test_dir.path(), "TOKEN", b"value", |prompt| {
+            assert!(matches!(prompt, super::RecoveryPrompt::Create));
+            calls += 1;
+            Ok(SecretString::from(String::new()))
+        }).unwrap_err();
+        assert_eq!(error, "vault: recovery passphrase must not be empty");
+        assert_eq!(calls, 1);
+        assert!(!test_dir.path().join("vault").exists());
+    }
+
+    #[test]
     fn application_support_path_uses_xdg_or_macos_default() {
+        let cases = [
+            (
+                "absolute XDG path",
+                Some(OsString::from("/custom/data")),
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/custom/data")),
+            ),
+            (
+                "relative XDG falls back",
+                Some(OsString::from("relative")),
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/home/user/Library/Application Support")),
+            ),
+            (
+                "absent XDG falls back",
+                None,
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/home/user/Library/Application Support")),
+            ),
+            (
+                "empty XDG falls back",
+                Some(OsString::new()),
+                Some(OsString::from("/home/user")),
+                Ok(PathBuf::from("/home/user/Library/Application Support")),
+            ),
+            (
+                "missing HOME errors when XDG is absent",
+                None,
+                None,
+                Err("vault: HOME is not set and XDG_DATA_HOME is not absolute".to_owned()),
+            ),
+            (
+                "missing HOME errors when XDG is relative",
+                Some(OsString::from("relative")),
+                None,
+                Err("vault: HOME is not set and XDG_DATA_HOME is not absolute".to_owned()),
+            ),
+            (
+                "relative HOME keeps existing error",
+                None,
+                Some(OsString::from("relative-home")),
+                Err("vault: HOME must be an absolute path".to_owned()),
+            ),
+        ];
+        for (label, xdg, home, expected) in cases {
+            assert_eq!(data_home_from(xdg, home), expected, "{label}");
+        }
+
+        use std::os::unix::ffi::OsStringExt;
+        let xdg = OsString::from_vec(b"/custom/\xffdata".to_vec());
         assert_eq!(
-            data_home_from(Some(OsString::from("/custom/data")), Some(OsString::from("/home/user")))
-                .unwrap(),
-            std::path::PathBuf::from("/custom/data")
-        );
-        assert_eq!(
-            data_home_from(Some(OsString::from("relative")), Some(OsString::from("/home/user")))
-                .unwrap(),
-            std::path::PathBuf::from("/home/user/Library/Application Support")
+            data_home_from(Some(xdg.clone()), Some(OsString::from("/home/user"))),
+            Ok(PathBuf::from(xdg))
         );
     }
 
     #[test]
     fn secret_name_filename_encoding_is_canonical_and_path_safe() {
-        for name in ["TOKEN", "one.two", "slash/name", "é" ] {
-            let filename = secret_filename(name).unwrap();
-            assert_eq!(decode_secret_filename(&filename).as_deref(), Some(name));
-            assert!(!filename.contains('/'));
+        for (name, filename) in [
+            ("TOKEN", "544f4b454e.age"),
+            ("one.two", "6f6e652e74776f.age"),
+            ("slash/name", "736c6173682f6e616d65.age"),
+            ("é", "c3a9.age"),
+            ("~", "7e.age"),
+        ] {
+            assert_eq!(secret_filename(name).unwrap(), filename, "encode {name:?}");
+            assert_eq!(decode_secret_filename(filename).as_deref(), Some(name), "decode {filename:?}");
         }
-        assert!(validate_store_name(&"x".repeat(MAX_NAME_BYTES + 1)).is_err());
-        assert_eq!(decode_secret_filename("4142.age").as_deref(), Some("AB"));
+        for filename in [".age", "0.age", "00.age", "ff.age", "c3.age", "gg.age", "4G.age", "4f.AGE", "4f.agex", "4F.age", "4f", "4f.age.age"] {
+            assert_eq!(decode_secret_filename(filename), None, "reject {filename:?}");
+        }
+        for name in ["", "a\0b"] {
+            assert!(validate_store_name(name).is_err(), "reject {name:?}");
+            assert!(secret_filename(name).is_err(), "reject {name:?}");
+        }
+        let limit = "é".repeat(62) + "x";
+        let over = "é".repeat(63);
+        let encoded_limit = "c3a9".repeat(62) + "78.age";
+        let encoded_over = "c3a9".repeat(63) + ".age";
+        assert!(validate_store_name(&limit).is_ok());
+        assert!(validate_store_name(&over).is_err());
+        assert_eq!(secret_filename(&limit).unwrap(), encoded_limit);
+        assert!(secret_filename(&over).is_err());
+        assert_eq!(decode_secret_filename(&encoded_limit).as_deref(), Some(limit.as_str()));
+        assert_eq!(decode_secret_filename(&encoded_over), None);
     }
 
     #[test]

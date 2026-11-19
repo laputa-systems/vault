@@ -1,10 +1,14 @@
 #[cfg(unix)]
+#[path = "support/controlling_tty.rs"]
+mod controlling_tty;
+
+#[cfg(unix)]
 mod unix_pty {
-    use rustix::termios::{InputModes, LocalModes, OptionalActions, tcgetattr, tcsetattr};
-    use std::ffi::{c_char, c_int, c_void};
+    use super::controlling_tty::open_pty;
+    use rustix::termios::{LocalModes, tcgetattr};
+    use std::ffi::c_int;
     use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::os::fd::FromRawFd;
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
@@ -22,17 +26,6 @@ mod unix_pty {
     #[cfg(target_os = "linux")]
     static NEXT_DATA_HOME: AtomicU64 = AtomicU64::new(0);
 
-    #[link(name = "util")]
-    unsafe extern "C" {
-        fn openpty(
-            master: *mut c_int,
-            slave: *mut c_int,
-            name: *mut c_char,
-            termios: *const c_void,
-            window_size: *const c_void,
-        ) -> c_int;
-    }
-
     unsafe extern "C" {
         fn kill(process: c_int, signal: c_int) -> c_int;
         fn signal(signal: c_int, handler: usize) -> usize;
@@ -49,33 +42,6 @@ mod unix_pty {
     const SIGCONT: c_int = 19;
     const WNOHANG: c_int = 1;
     const WUNTRACED: c_int = 2;
-
-    fn open_pty() -> io::Result<(File, File)> {
-        let mut master = -1;
-        let mut slave = -1;
-        let result = unsafe {
-            openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        if result == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        let (master, slave) = unsafe {
-            (
-                File::from_raw_fd(master),
-                File::from_raw_fd(slave),
-            )
-        };
-        let mut settings = tcgetattr(&slave).map_err(io::Error::from)?;
-        settings.input_modes &= !InputModes::ISTRIP;
-        tcsetattr(&slave, OptionalActions::Now, &settings).map_err(io::Error::from)?;
-        Ok((master, slave))
-    }
 
     #[cfg(target_os = "linux")]
     struct TestDataHome(std::path::PathBuf);

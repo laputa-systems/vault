@@ -1033,6 +1033,10 @@ impl Drop for SignalHandlers {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/support/controlling_tty.rs"]
+mod controlling_tty;
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1040,6 +1044,299 @@ mod tests {
         parse_exec_args, read_limited_utf8, read_without_echo, run_child,
     };
     use std::io::{self, Cursor, Read, Write};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn read_passphrase_owned_terminal_cleanup() {
+        use age::secrecy::ExposeSecret;
+        use rustix::termios::{LocalModes, tcgetattr};
+        use std::fs;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const ROOT: &str = "VAULT_SIGNAL_ROOT";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let case = std::env::var("VAULT_PASSPHRASE_CASE").unwrap();
+            fs::write(root.join("entered"), b"yes").unwrap();
+            struct FailureMarker(std::path::PathBuf);
+            impl Drop for FailureMarker {
+                fn drop(&mut self) {
+                    if std::thread::panicking() {
+                        let _ = fs::write(self.0.join("failed"), b"yes");
+                        let deadline = Instant::now() + Duration::from_secs(15);
+                        while !self.0.join("release").exists() && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                }
+            }
+            let _failure = FailureMarker(root.clone());
+            fn descriptors() -> Vec<std::ffi::OsString> {
+                let mut entries = fs::read_dir("/dev/fd").unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>();
+                entries.sort();
+                entries
+            }
+            let before_fds = descriptors();
+            if case == "io-prompt" || case == "io-open" || case == "io-control" { fs::write(root.join("armed"), b"yes").unwrap(); }
+            let result = super::read_passphrase("owned prompt: ", "test");
+            assert_eq!(descriptors(), before_fds, "passphrase descriptors leaked");
+            match case.as_str() {
+                "empty" | "empty-trace" | "io-control" => assert_eq!(result.unwrap().expose_secret(), ""),
+                "invalid" => assert!(matches!(result, Err(CliError::InvalidUtf8))),
+                "io-open" => assert!(matches!(result, Err(CliError::InvalidInput(message)) if message == "vault: a controlling terminal is required to enter the test passphrase")),
+                "io-prompt" | "io-newline" => assert!(matches!(result, Err(CliError::Io { operation: "write passphrase prompt", source }) if source.raw_os_error() == Some(5))),
+                "io-invalid-newline" => match result {
+                    Err(CliError::TerminalReadAndPromptOutput { read, output }) => {
+                        assert!(matches!(*read, CliError::InvalidUtf8));
+                        assert_eq!(output.raw_os_error(), Some(5));
+                    }
+                    other => panic!("wrong combined error: {other:?}"),
+                },
+                "empty-fault" => assert!(matches!(result, Err(CliError::SignalRestore(error)) if error.raw_os_error() == Some(5))),
+                "invalid-fault" => match result {
+                    Err(CliError::TerminalReadAndSignalRestore { read, restore }) => {
+                        assert!(matches!(*read, CliError::InvalidUtf8));
+                        assert_eq!(restore.raw_os_error(), Some(5));
+                    }
+                    other => panic!("wrong combined error: {other:?}"),
+                },
+                _ => panic!("unknown case"),
+            }
+            fs::write(root.join("complete"), b"yes").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !root.join("release").exists() {
+                assert!(Instant::now() < deadline, "parent release deadline");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return;
+        }
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        struct OwnedChild(Child, bool, Option<fs::File>);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                if !self.1 {
+                    drop(self.2.take());
+                    if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+                        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                    }
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        fn wait(child: &mut OwnedChild) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() { child.1 = true; return status; }
+                assert!(Instant::now() < deadline, "owned child deadline");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let path = std::env::temp_dir().join(format!("passphrase-{}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        let scratch = Scratch(path);
+        let library = scratch.0.join("fault.dylib");
+        let mut compiler = OwnedChild(Command::new("cc").args(["-dynamiclib", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/signal_fault.c")).arg("-o").arg(&library)
+            .process_group(0).spawn().unwrap(), false, None);
+        assert!(wait(&mut compiler).success(), "fixture compile");
+        for case in ["empty", "invalid", "empty-trace", "empty-fault", "invalid-fault", "io-prompt", "io-newline", "io-invalid-newline", "io-control", "io-open"] {
+            let root = scratch.0.join(case);
+            fs::create_dir(&root).unwrap();
+            let (master, slave) = super::controlling_tty::open_pty().unwrap();
+            let before = tcgetattr(&slave).unwrap();
+            let flags = rustix::fs::fcntl_getfl(&master).unwrap();
+            rustix::fs::fcntl_setfl(&master, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+            let root_text = root.to_str().unwrap();
+            let library_text = library.to_str().unwrap();
+            let mut child = OwnedChild(super::controlling_tty::launch_binary_with_controlling_tty(
+                std::env::current_exe().unwrap().as_os_str(), &slave, &root,
+                &["--exact", "tests::read_passphrase_owned_terminal_cleanup", "--nocapture"],
+                &[(ROOT, root_text), ("VAULT_PASSPHRASE_CASE", case), ("VAULT_SIGNAL_MODE", if case == "empty-trace" { "caller-control" } else if case == "io-prompt" || case == "io-open" || case == "io-control" { case } else if case.starts_with("io-") { "io-newline" } else { "caller-restore" }), ("DYLD_INSERT_LIBRARIES", library_text)],
+                Stdio::null(),
+            ).unwrap(), false, Some(master));
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut output = Vec::new();
+            loop {
+                let mut buf = [0; 512];
+                match child.2.as_mut().unwrap().read(&mut buf) {
+                    Ok(n) => output.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {},
+                    Err(e) => panic!("{case}: terminal read: {e}"),
+                }
+                let hidden = !tcgetattr(&slave).unwrap().local_modes.intersects(LocalModes::ECHO | LocalModes::ECHONL | LocalModes::ICANON);
+                if output.windows(b"owned prompt: ".len()).any(|w| w == b"owned prompt: ") && hidden { break; }
+                if (case == "io-prompt" || case == "io-open") && (root.join("complete").exists() || root.join("failed").exists()) { break; }
+                assert!(child.0.try_wait().unwrap().is_none(), "{case}: child exited before prompt: {output:?}");
+                assert!(Instant::now() < deadline, "{case}: prompt deadline: {output:?}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(fs::read(root.join("entered")).unwrap(), b"yes");
+            if case.ends_with("fault") || case == "empty-trace" || case == "io-newline" || case == "io-invalid-newline" { fs::write(root.join("armed"), b"yes").unwrap(); }
+            if case != "io-prompt" && case != "io-open" {
+                child.2.as_mut().unwrap().write_all(if case.starts_with("invalid") || case == "io-invalid-newline" { b"\xff\n" } else { b"\n" }).unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !root.join("complete").exists() && !root.join("failed").exists() {
+                assert!(child.0.try_wait().unwrap().is_none(), "{case}: child exited before completion");
+                assert!(Instant::now() < deadline, "{case}: completion deadline");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let after = tcgetattr(&slave).unwrap();
+            assert_eq!(after.input_modes, before.input_modes);
+            assert_eq!(after.output_modes, before.output_modes);
+            assert_eq!(after.control_modes, before.control_modes);
+            assert_eq!(after.local_modes & !LocalModes::PENDIN, before.local_modes & !LocalModes::PENDIN);
+            let mut buf = [0; 4096];
+            while let Ok(n) = child.2.as_mut().unwrap().read(&mut buf) {
+                if n == 0 { break; }
+                output.extend_from_slice(&buf[..n]);
+            }
+            fs::write(root.join("release"), b"yes").unwrap();
+            drop(child.2.take());
+            let status = wait(&mut child);
+            let mut stdout = String::new();
+            child.0.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
+            assert!(status.success(), "{case}: {status}: {stdout}: {}", String::from_utf8_lossy(&output));
+            assert_eq!(fs::read(root.join("complete")).unwrap(), b"yes");
+            if case.starts_with("io-") && case != "io-control" {
+                assert_eq!(fs::read_to_string(root.join("events")).unwrap(), if case == "io-prompt" { "W1!\n" } else if case == "io-open" { "O1!\n" } else { "W2!\n" });
+            } else if case.ends_with("fault") {
+                assert_eq!(fs::read_to_string(root.join("events")).unwrap(), "S18!\nS15\nS3\nS2\nS1\nS18\n");
+            } else if case == "empty-trace" {
+                assert_eq!(fs::read_to_string(root.join("events")).unwrap(), "S18\nS15\nS3\nS2\nS1\n");
+            } else {
+                assert!(!root.join("events").exists());
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn signal_handler_native_faults() {
+        use super::SignalHandlers;
+        use std::fs;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const ROOT: &str = "VAULT_SIGNAL_ROOT";
+        const MODE: &str = "VAULT_SIGNAL_MODE";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let mode = std::env::var(MODE).unwrap();
+            fs::write(root.join("entered"), b"yes").unwrap();
+            fs::write(root.join("armed"), b"yes").unwrap();
+            match mode.as_str() {
+                "install" | "interrupt" | "combined" => {
+                    let error = match SignalHandlers::install() { Err(error) => error, Ok(_) => panic!("install succeeded") };
+                    match error {
+                        CliError::SignalSetup { source, restore } => {
+                            assert_eq!(source.raw_os_error(), Some(if mode == "interrupt" { 22 } else { 5 }));
+                            assert_eq!(restore.and_then(|e| e.raw_os_error()), if mode == "combined" { Some(5) } else { None });
+                        }
+                        other => panic!("wrong error: {other:?}"),
+                    }
+                }
+                "restore" | "suspend-restore" => {
+                    let mut handlers = SignalHandlers::install().unwrap();
+                    assert_eq!(handlers.previous.len(), 5);
+                    if mode == "restore" {
+                        assert_eq!(handlers.restore().unwrap_err().raw_os_error(), Some(5));
+                    } else {
+                        match handlers.suspend_and_resume() {
+                            Err(CliError::SignalRestore(error)) => assert_eq!(error.raw_os_error(), Some(5)),
+                            other => panic!("wrong restore result: {other:?}"),
+                        }
+                    }
+                    assert_eq!(handlers.previous.iter().map(|entry| entry.0).collect::<Vec<_>>(), [3, 18]);
+                    handlers.restore().unwrap();
+                    assert!(handlers.previous.is_empty());
+                }
+                "raise" => {
+                    let mut handlers = SignalHandlers::install().unwrap();
+                    match handlers.suspend_and_resume() {
+                        Err(CliError::SignalSuspend(error)) => assert_eq!(error.raw_os_error(), Some(3)),
+                        other => panic!("wrong suspend result: {other:?}"),
+                    }
+                    assert!(handlers.previous.is_empty());
+                }
+                "control" => {
+                    let mut handlers = SignalHandlers::install().unwrap();
+                    assert_eq!(handlers.previous.len(), 5);
+                    let pid = rustix::process::Pid::from_raw(i32::try_from(std::process::id()).unwrap()).unwrap();
+                    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while super::PENDING_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) != 2 {
+                        assert!(Instant::now() < deadline, "installed handler did not receive SIGINT");
+                        std::thread::yield_now();
+                    }
+                    handlers.restore().unwrap();
+                    assert!(handlers.previous.is_empty());
+                }
+                _ => panic!("unknown mode"),
+            }
+            fs::remove_file(root.join("armed")).unwrap();
+            fs::write(root.join("complete"), b"yes").unwrap();
+            return;
+        }
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        struct OwnedChild(Child, bool);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                if !self.1 {
+                    if let Some(pid) = rustix::process::Pid::from_raw(self.0.id() as i32) {
+                        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                    }
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        fn wait(child: &mut OwnedChild) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() { child.1 = true; return status; }
+                assert!(Instant::now() < deadline, "owned child deadline");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let scratch_path = std::env::temp_dir().join(format!("sig-{}", std::process::id()));
+        fs::create_dir(&scratch_path).unwrap();
+        let scratch = Scratch(scratch_path);
+        let library = scratch.0.join("fault.dylib");
+        let mut compiler = OwnedChild(Command::new("cc").args(["-dynamiclib", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/signal_fault.c")).arg("-o").arg(&library)
+            .process_group(0).spawn().unwrap(), false);
+        assert!(wait(&mut compiler).success(), "fixture compile");
+        for (mode, events) in [
+            ("control", ""),
+            ("install", "S1\nI1\nS2!\nS1\n"),
+            ("interrupt", "S1\nI1\nS2\nI2!\nS2\nS1\n"),
+            ("combined", "S1\nI1\nS2!\nS1!\nS1\n"),
+            ("restore", "S1\nI1\nS2\nI2\nS3\nI3\nS15\nI15\nS18\nI18\nS18!\nS15\nS3!\nS2\nS1\nS18\nS3\n"),
+            ("suspend-restore", "S1\nI1\nS2\nI2\nS3\nI3\nS15\nI15\nS18\nI18\nS18!\nS15\nS3!\nS2\nS1\nS18\nS3\n"),
+            ("raise", "S1\nI1\nS2\nI2\nS3\nI3\nS15\nI15\nS18\nI18\nS18\nS15\nS3\nS2\nS1\nR18!\n"),
+        ] {
+            let root = scratch.0.join(mode);
+            fs::create_dir(&root).unwrap();
+            let log = fs::File::create(root.join("log")).unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::signal_handler_native_faults", "--nocapture"])
+                .env(ROOT, &root).env(MODE, mode).stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log)).process_group(0);
+            if mode == "control" { command.env_remove("DYLD_INSERT_LIBRARIES"); }
+            else { command.env("DYLD_INSERT_LIBRARIES", &library); }
+            let mut child = OwnedChild(command.spawn().unwrap(), false);
+            let status = wait(&mut child);
+            assert!(status.success(), "{mode}: {status}: {}", fs::read_to_string(root.join("log")).unwrap());
+            assert_eq!(fs::read(root.join("entered")).unwrap(), b"yes");
+            assert_eq!(fs::read(root.join("complete")).unwrap(), b"yes");
+            if !events.is_empty() { assert_eq!(fs::read_to_string(root.join("events")).unwrap(), events, "{mode}"); }
+        }
+    }
 
     #[test]
     fn help_examples_parse_without_running_commands() {

@@ -1664,6 +1664,25 @@ mod tests {
     }
 
     #[test]
+    fn ciphertext_file_limits_accept_exact_bounds_and_reject_one_more() {
+        let temp = TestDir::new();
+        let directory = File::open(temp.path()).unwrap();
+        for (name, bound, configured_limit) in [
+            ("secret.age", 17 * 1024 * 1024, MAX_SECRET_CIPHERTEXT),
+            ("identity.age", 1024 * 1024, MAX_IDENTITY_CIPHERTEXT),
+        ] {
+            let path = temp.path().join(name);
+            let file = fs::File::create(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_FILE_MODE)).unwrap();
+            file.set_len(bound).unwrap();
+            assert_eq!(read_private_file(&directory, name, configured_limit).unwrap().len() as u64, bound);
+            file.set_len(bound + 1).unwrap();
+            assert_eq!(read_private_file(&directory, name, configured_limit).unwrap_err(),
+                format!("vault: {name} exceeds the maximum file size"));
+        }
+    }
+
+    #[test]
     fn damaged_secret_does_not_leak_contents_and_listing_does_not_decrypt() {
         let temp = TestDir::new();
         initialize(temp.path());

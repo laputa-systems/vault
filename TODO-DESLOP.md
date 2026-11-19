@@ -1,9 +1,35 @@
 Prefix: DSLP
-Next: 8
+Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
+
+**Branch tests landed**
+
+Each fault below was injected into production code, produced a failing focused test (exit 101), and was reverted.
+
+| Group | Protected behavior | Injected fault |
+| --- | --- | --- |
+| Filename codec | Canonical path-safe encoding and byte limits | Encode hex in uppercase |
+| Data home | XDG and HOME fallback, invalid and non-UTF-8 paths | Use the wrong fallback directory |
+| Atomic writes | Destination admission, failed writes and syncs, rename and crash windows | Skip file sync |
+| Directory trust | Listing rejects writable and symlinked ancestors | Allow writable parents |
+| Private files | Reject links and nonregular files, repair modes, enforce read limits | Follow symlinks on open |
+| Locks | Reject unsafe lock files and repair permissions | Skip lock mode repair |
+| Staging and listing | Filter entries and refuse unsafe nested cleanup | Include symlinks in ordinary listings |
+| Bootstrap | Publish a private recoverable store, refuse replacement, reject empty recovery passphrases and clean failed stages | Skip cleanup after wrapping fails |
+| Identity input | Reject invalid Secure Enclave identity bytes and sidecars | Skip sidecar validation |
+| Store formats | Reject mismatched recipients and malformed identity formats | Accept mismatched recipients |
+| Decrypted sizes | Accept exact bounds and reject oversized values | Reject values at the exact secret limit |
+| Linux ciphertext files | Accept exact file limits and reject one extra byte | Reject files at the exact limit |
+| Signal failures | Report setup and restoration failures and retry failed restoration | Discard handlers whose restoration failed |
+| Passphrase terminal I/O | Restore terminal and signals and report open, prompt, input and combined errors | Skip explicit signal restoration |
+| Uninitialized store | List, purge and lock without creating a store | Create the data home during listing |
+
+Dropped: generated temporary-name spelling, descriptor flag and fake-metadata assertions that track implementation details; duplicate path, codec and cleanup checks covered by the wider tests above or existing main tests; mutation selection, shard budgets, CI and qualification receipts because wide mutation runs are paused. The non-UTF-8 filename listing case is unavailable on this macOS filesystem, while non-UTF-8 data-home resolution is covered. The standalone native cache startup candidate remains unported and unverified here; hardware authentication and physical power-loss durability remain unverified.
+
+Fully superseded stranded branches: none established. Their histories also contain the unported native cache startup candidate, so retain them until it is dispositioned; do not infer safe deletion from these ports alone.
 
 Ground: base `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`; macOS arm64, Rust nightly 1.102.0, `cpu-guard --cores 6`: fresh-target `make test` 15.23s, warm 4.43s, `make lint` 9.80s; all exit 0. Tests: 56 passed, two hardware authentication tests ignored. No vendored source trees found. No performance workload exists; no established user-visible performance gate. No runtime code changed.
 
@@ -23,7 +49,7 @@ Types: 422 escape-hatch lines before and after (first-party Rust including build
 | redundant_clone | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
 | needless_pass_by_value | 4 / 3 | 0 | 0 | 4 / 3 | Reject: ownership and callbacks |
 
-Tests (DSLP-4): required scope is `src/store.rs` encryption, authentication and size bounds; `src/macos.rs` and `src/linux.rs` identity and bootstrap validation, atomic publication and cleanup; `src/main.rs` passphrase input, signal restoration, CLI limits and exit statuses; and the macOS cache socket admission and protocol. The ordinary suite exercises age format and tampering, recipient matching, terminal echo and signal restoration, input limits, child status and socket requests. `tests/integration.rs` rejects surplus names before storage. Atomic syscall failures and process-crash windows, bootstrap domain, and signal syscall failures have useful witnesses on the unmerged branches below; they are not asserted to run on main.
+Tests (DSLP-4): required scope is `src/store.rs` encryption, authentication and size bounds; `src/macos.rs` and `src/linux.rs` identity and bootstrap validation, atomic publication and cleanup; `src/main.rs` passphrase input, signal restoration, CLI limits and exit statuses; and the macOS cache socket admission and protocol. The ordinary suite exercises age format and tampering, recipient matching, terminal echo and signal restoration, input limits, child status and socket requests. `tests/integration.rs` rejects surplus names before storage. Atomic syscall failures and process-crash windows, bootstrap domain, and signal syscall failures now have witnesses in the landed groups above.
 
 Recorded mutation dispositions are grouped by behavior. The store selection on `e8c79312` records 45 caught and six unviable; the macOS cache/store selection records 69 caught and 29 unviable. These receipts use branch tests and do not establish main's mutation result. The original macOS filesystem run at `35fa554` was incomplete: 102 caught, 65 missed, six unviable, 59 unrun. Follow-up branch tests reconcile the misses as 46 caught and 19 equivalent and the unrun as 49 caught, four equivalent and six unviable. Equivalent groups include disjoint open-flag OR/XOR, redundant filename validation and newline rejection by age parsing. Unviable replacements do not provide evidence. Private temporary-name spelling and incidental diagnostics, including the shard 9 size-display arithmetic, need no further tests. Linux shard 13's surplus-name survivor is covered by the ordinary CLI regression; the terminal-flag OR/XOR survivor remains unresolved pending a Linux-specific equivalence check. Signal setup and restoration failures have branch witnesses; three historical terminal hangs remain incomplete. Exact trials are in `git show deslop/cli-oracle:docs/deslop-filesystem.md`, `git show deslop/signal-failure-tests:docs/deslop-signal-tests.md` and `git show deslop/platform-ci:docs/deslop-platform-ci.md`.
 
@@ -83,4 +109,14 @@ Local branch inventory against `origin/main` at `553fb720`. Tests listed as wort
 - **Recommendation:** Add a documented, repeatable two-Mac recovery boundary check using a disposable store, verifying recovery and readback after transfer, plus rejection of a wrong passphrase. Include src/macos.rs, src/secure_enclave.rs and src/store.rs in the critical mutation scope.
 - **Fix with:** test-audit
 - **Effort:** M
+
+
+### DSLP-8 · P3 · Port the native cache startup test from the stranded branches
+
+- **Area:** deslop · tests
+- **Where:** deslop/platform-ci tests/cache_spawn.rs; Cargo.toml test targets
+- **Problem:** The stranded branches carry a native cache startup test that needs its own Cargo test target; it was not ported when the other branch tests landed, so cache spawn and startup on macOS have no witness on main.
+- **Recommendation:** Port the test with its Cargo test target, prove it with one injected startup fault, then delete the stranded deslop branches.
+- **Fix with:** deslop
+- **Effort:** S
 
