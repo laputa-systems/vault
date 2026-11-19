@@ -6,6 +6,9 @@ FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4c
 ARG TARGETARCH
 ARG LLVM_VERSION=23.1.5
 ARG LLVM_RELEASE_SHA=dc0d9b9
+ARG RAGE_VERSION=0.12.1
+ARG RAGE_X86_64_SHA256=e36bfce012d34d191ee2d8372e061de0d3069c8585c4ab6396524a2a0e08bf32
+ARG RAGE_ARM64_SHA256=9c4bd3bc27370ed36962632278a0264534699118493aa989088838b68de1c3d4
 ARG RUSTUP_VERSION=1.29.3
 ARG RUSTUP_X86_64_SHA256=1552169aba2836777136ccff7a381e95c17233b5d8250cd5e10ae3cb971bfcfc
 ARG RUSTUP_AARCH64_SHA256=956deacdc27ab82ae7ac821d5d3e9e95e4795d476d17efe99743bb8531ca1031
@@ -52,6 +55,17 @@ RUN for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do \
             /opt/llvm-musl/bin/clang --target="$target" -x c -c /dev/null -o "$stub_dir/$obj"; \
         done; \
     done
+
+RUN case "$TARGETARCH" in \
+        amd64) arch=amd64; sum=$RAGE_X86_64_SHA256 ;; \
+        arm64) arch=arm64; sum=$RAGE_ARM64_SHA256 ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && archive=/vault/.work/tmp/rage.deb \
+    && wget -O "$archive" "https://github.com/str4d/rage/releases/download/v${RAGE_VERSION}/rage-musl_${RAGE_VERSION}-1_${arch}.deb" \
+    && echo "$sum  $archive" | sha256sum -c - \
+    && ar p "$archive" data.tar.xz | tar xJf - -C /usr/local/bin --strip-components=3 ./usr/bin/rage ./usr/bin/rage-keygen \
+    && rm "$archive"
 
 RUN case "$TARGETARCH" in \
         amd64) arch=x86_64; sum=$RUSTUP_X86_64_SHA256 ;; \

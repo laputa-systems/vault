@@ -4,6 +4,8 @@ mod controlling_tty;
 
 #[cfg(unix)]
 mod unix_pty {
+    #[cfg(target_os = "linux")]
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/prerequisite.rs"));
     use super::controlling_tty::open_pty;
     use rustix::termios::{LocalModes, tcgetattr};
     use std::ffi::c_int;
@@ -164,6 +166,18 @@ mod unix_pty {
         prompt: &str,
         response: &str,
     ) -> io::Result<()> {
+        wait_for_prompt_with_mode(master, chunks, output, prompt, response, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_prompt_with_mode(
+        master: &mut File,
+        chunks: &Receiver<Vec<u8>>,
+        output: &mut Vec<u8>,
+        prompt: &str,
+        response: &str,
+        raw: bool,
+    ) -> io::Result<()> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !output
             .windows(prompt.len())
@@ -181,7 +195,12 @@ mod unix_pty {
                 .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
             output.extend_from_slice(&chunk);
         }
-        wait_for_hidden_echo(master)?;
+        let modes = if raw {
+            LocalModes::ECHO | LocalModes::ECHONL | LocalModes::ICANON
+        } else {
+            LocalModes::ECHO
+        };
+        wait_for_disabled_modes(master, modes)?;
         master.write_all(response.as_bytes())?;
         master.write_all(b"\n")
     }
@@ -238,12 +257,14 @@ mod unix_pty {
     }
 
     fn wait_for_hidden_echo(terminal: &File) -> io::Result<()> {
+        wait_for_disabled_modes(terminal, LocalModes::ECHO | LocalModes::ECHONL | LocalModes::ICANON)
+    }
+
+    fn wait_for_disabled_modes(terminal: &File, modes: LocalModes) -> io::Result<()> {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let settings = tcgetattr(terminal).map_err(io::Error::from)?;
-            if !settings.local_modes.intersects(
-                LocalModes::ECHO | LocalModes::ECHONL | LocalModes::ICANON,
-            ) {
+            if !settings.local_modes.intersects(modes) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -687,14 +708,14 @@ mod unix_pty {
             None => match Command::new("rage").arg("--version").output() {
                 Ok(output) if output.status.success() => std::path::PathBuf::from("rage"),
                 _ => {
-                    eprintln!("skipped age interoperability: rage 0.12.1 is unavailable");
+                    missing_prerequisite("rage 0.12.1 is unavailable");
                     return;
                 }
             },
         };
-        let version = Command::new(&rage).arg("--version").output().unwrap();
-        if !version.status.success() || !String::from_utf8_lossy(&version.stdout).contains("0.12.1") {
-            eprintln!("skipped age interoperability: rage 0.12.1 is required");
+        let version = Command::new(&rage).arg("--version").output();
+        if !matches!(version, Ok(output) if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "rage 0.12.1") {
+            missing_prerequisite("rage 0.12.1 is required");
             return;
         }
 
@@ -769,12 +790,13 @@ mod unix_pty {
         .unwrap();
         drop(slave);
         let mut terminal_output = Vec::new();
-        wait_for_prompt(
+        wait_for_prompt_with_mode(
             &mut master,
             &chunks,
             &mut terminal_output,
             "Type passphrase",
             passphrase,
+            false,
         )
         .unwrap();
         let rage_identity = decrypt_identity.wait_with_output().unwrap();
@@ -881,5 +903,6 @@ mod unix_pty {
             .write_all(&rage_identity.stdout)
             .unwrap();
         assert!(!reject_damaged.wait_with_output().unwrap().status.success());
+        eprintln!("rage interoperability assertions executed");
     }
 }

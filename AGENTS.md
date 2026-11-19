@@ -17,9 +17,9 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
 - Prompt-to-read echo ownership and prompt-failure restoration: `src/main.rs` tests `prompt_and_read_share_one_hidden_terminal_session` and `prompt_failure_restores_echo_and_reports_restore_failure`; Linux controlling-terminal behavior: `tests/terminal_cli.rs`. Exact proof and limits: `docs/deslop-terminal-echo.md`.
 - Secret set/get/list/remove, passphrases, size limits and cache: Linux `tests/terminal_cli.rs` and `src/linux.rs` tests; macOS `src/macos.rs` tests, with hardware roundtrip ignored by default.
-- age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability test skips without rage 0.12.1.
+- age ciphertext and identity formats, authentication and tampering: `src/store.rs` tests; Linux external rage interoperability requires rage 0.12.1 in CI and visibly skips locally when unavailable.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
-- macOS cache socket protocol: `src/macos.rs` identity cache tests; Linux keyring assertions can skip when unavailable.
+- macOS cache socket protocol: `src/macos.rs` identity cache tests. Linux session keyring assertions are an owner-run boundary: run `CI=true cargo test identity_cache_permissions_expiry_refresh_and_revocation_are_enforced -- --nocapture` on a Linux host with a usable session keyring and readable `/proc/keys`. The CI container returns `Operation not permitted` for keyctl, so `make test-ci` names and excludes that test; cache-scope assertions in `cache_clear_is_store_scoped_and_recipient_replacement_does_not_hide_stale_cache` also skip when unavailable.
 - Public library API and network endpoints: none; this is a CLI.
 - Performance workload: none; no benchmark or established user-visible performance gate exists. Ranked gaps: [TODO-DESLOP.md](TODO-DESLOP.md#report).
 
