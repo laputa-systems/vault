@@ -1119,6 +1119,7 @@ fn io_error(operation: &str, source: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/prerequisite.rs"));
     use super::*;
     use age::Decryptor;
     use std::fs;
@@ -1353,22 +1354,22 @@ mod tests {
         let keyring = match identity_cache_keyring(&data, false) {
             Ok(Some(keyring)) => keyring,
             Ok(None) => {
-                eprintln!("skipped keyring assertions: kernel identity cache is unavailable");
+                missing_prerequisite("Linux session keyring identity cache is unavailable");
                 return;
             }
             Err(error) => {
-                eprintln!("skipped keyring assertions: {error}");
+                missing_prerequisite(&format!("Linux session keyring is unavailable: {error}"));
                 return;
             }
         };
         let key = match search_keyring(keyring, c"user", c"identity") {
             Ok(Some(key)) => key,
             Ok(None) => {
-                eprintln!("skipped keyring assertions: cached identity is unavailable");
+                missing_prerequisite("Linux session keyring cached identity is unavailable");
                 return;
             }
             Err(error) => {
-                eprintln!("skipped keyring assertions: {error}");
+                missing_prerequisite(&format!("Linux session keyring is unavailable: {error}"));
                 return;
             }
         };
@@ -1382,7 +1383,7 @@ mod tests {
                     io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
                 ) =>
             {
-                eprintln!("skipped key timeout query: {error}");
+                missing_prerequisite(&format!("Linux session keyring timeout query is unavailable: {error}"));
                 return;
             }
             Err(error) => panic!("cannot inspect identity cache timeout: {error}"),
@@ -1521,7 +1522,11 @@ mod tests {
             let second_recipient = read_recipient(&second_store.root).unwrap();
             assert!(read_cached_identity(&second_data, &second_recipient).unwrap().is_some());
         } else {
-            eprintln!("skipped cache scope assertions: kernel identity cache is unavailable");
+            std::io::Write::write_all(
+                &mut std::io::stderr().lock(),
+                b"skipped Linux session keyring cache scope assertions: kernel identity cache is unavailable\n",
+            )
+            .unwrap();
         }
     }
 
