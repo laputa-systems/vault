@@ -5,92 +5,28 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
-**Bench audit**
+DSLP-1 base: `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`, an ancestor of report admission `1fff677b0f6910c74e8a89f4907e209d82b6d510`. The cumulative review covers that diff, including terminal prompt ownership, file admission and publication, cache admission, CLI behavior and the new tests. No additional demonstrated defect or supported new finding was established.
 
-No representative performance workload, benchmark harness, or regression gate was found in the tracked project files, Cargo targets, Makefile, scripts, or docs. Ground's test and lint durations measure verification, not user operations. The one-off release-profile binary sizes and prompt-error-path memory observations in `docs/deslop-terminal-echo.md` do not establish distribution size, startup, or normal store performance. No benchmark entrypoint or workload tiers exist; none were run.
+**Scorecard** (base → admission). Line counts are physical lines in first-party Rust and C: `src/` and `build.rs` count as source until `#[cfg(test)] mod tests`; inline test modules and `tests/` count as tests. This is a simple partition, not a coverage measurement.
 
-Ranked outcomes lacking representative performance evidence, by risk of a regression reaching users:
-
-1. **P3 — retrieval and unlock (DSLP-9):** `vault get` and exec retrieval with a macOS cache socket hit or miss, Secure Enclave unlock cost, and Linux keyring hit or passphrase unlock. Interactive authentication time needs separate accounting from processing.
-2. **P3 — store scaling (DSLP-10):** list and get latency as entry count and secret size grow, including I/O and memory costs.
-3. **P3 — startup and artifact size (DSLP-11):** CLI startup latency and distribution binary size across supported platforms; the existing one-off release comparison is not a continuing baseline.
-
-The risks are unproven, not measured regressions. There are no recorded representative fixtures, correctness or completed-work checks, sample distributions, reference comparisons, host gates, attribution runs, or performance budgets. CPU sampling and filesystem syscall counts are candidate attribution tools, kept separate from timed runs. A future workload needs disposable stores, verified outputs, platform and cache-state prerequisites, recorded host and artifact identity, interleaved baselines, and visible unsupported or interactive cases; completion alone would not establish a performance verdict. Hardware unlock and live Linux keyring performance remain unverified. The smallest next action is to define and measure verified retrieval on a disposable store (DSLP-9).
-
-Dead code (DSLP-5): Rust nightly 1.102.0, all targets on macOS arm64 and Linux arm64 container, default features: `dead_code` and `unreachable_pub` found two unreachable public test helpers, `open_pty` and `launch_binary_with_controlling_tty`; their visibility is now crate-only. `open_pty` is called by `tests/terminal_cli.rs` and macOS `src/main.rs` tests. The launch helper is called by the latter; its single `allow(dead_code)` remains necessary because the terminal integration target imports the same file without calling that helper. Linux test-only `get_secrets_at` is used by storage tests; `identity_cache_timeout` and `parse_key_timeout` serve the keyring expiry test; `KEYCTL_DESCRIBE` serves its permission check. The test-only Secure Enclave `Interaction::Disallowed` is used by the ignored hardware test. Other test helpers are reached by their test targets. The macOS `initialize_store_with` seam is used by production initialization and bootstrap tests. No dead code or dependencies were removed; cargo-machete 0.10.1 found no unused dependencies. No compiler findings remain unsuppressed.
-
-Debloat review: the CLI dispatch reaches the platform storage modules; age and filesystem layers protect the documented store, cache and recovery contracts, while PTY and fault helpers exercise terminal and failure behavior. No behavior-preserving structural cut or owner walk-back was established within this scope. CI was outside scope. No CLI, store, protocol or recovery behavior changed; macOS tests and lint and both platform checks verify the visibility-only change. Hardware authentication, cross-Mac recovery and a live Linux keyring remain unverified by this pass.
-
-
-**Branch tests landed**
-
-Each fault below was injected into production code, produced a failing focused test (exit 101), and was reverted.
-
-| Group | Protected behavior | Injected fault |
+| Measure | Before | After / disposition |
 | --- | --- | --- |
-| Filename codec | Canonical path-safe encoding and byte limits | Encode hex in uppercase |
-| Data home | XDG and HOME fallback, invalid and non-UTF-8 paths | Use the wrong fallback directory |
-| Atomic writes | Destination admission, failed writes and syncs, rename and crash windows | Skip file sync |
-| Directory trust | Listing rejects writable and symlinked ancestors | Allow writable parents |
-| Private files | Reject links and nonregular files, repair modes, enforce read limits | Follow symlinks on open |
-| Locks | Reject unsafe lock files and repair permissions | Skip lock mode repair |
-| Staging and listing | Filter entries and refuse unsafe nested cleanup | Include symlinks in ordinary listings |
-| Bootstrap | Publish a private recoverable store, refuse replacement, reject empty recovery passphrases and clean failed stages | Skip cleanup after wrapping fails |
-| Identity input | Reject invalid Secure Enclave identity bytes and sidecars | Skip sidecar validation |
-| Store formats | Reject mismatched recipients and malformed identity formats | Accept mismatched recipients |
-| Decrypted sizes | Accept exact bounds and reject oversized values | Reject values at the exact secret limit |
-| Linux ciphertext files | Accept exact file limits and reject one extra byte | Reject files at the exact limit |
-| Signal failures | Report setup and restoration failures and retry failed restoration | Discard handlers whose restoration failed |
-| Passphrase terminal I/O | Restore terminal and signals and report open, prompt, input and combined errors | Skip explicit signal restoration |
-| Uninitialized store | List, purge and lock without creating a store | Create the data home during listing |
+| Source / test lines | 3,991 / 2,677 | 4,010 / 3,951 |
+| Warm `make test` | 4.43s, macOS arm64, six cores | Not measured under a quiet host; acceptance run checks correctness, not a timing gate. |
+| Line / branch coverage | No comparable DSLP-1 baseline | Main not measured. A macOS branch-only receipt recorded 2,386/3,110 lines and 292/446 branches, including repeated instantiations and excluding Linux and hardware; it is not a before/after comparison. |
+| Escape-hatch lines | 422 | 651 across first-party Rust including tests and build.rs; test additions account for much of the increase. Types alone was 422 → 422. This count is not a soundness verdict. |
+| Dead code / dependencies removed | — | 0 lines / 0 dependencies (#39); two test helpers narrowed in visibility. |
+| Findings filed / fixed | — | Diagnose: 0 defects, one P3 gap (DSLP-7); Ground: one P2 gap (DSLP-6), fixed by #41. Bench: three P3 gaps (DSLP-9–11); branch tests: one P3 gap (DSLP-8). No P1 findings. No P3 fixed. One additional terminal echo defect was fixed in #34; its priority was not recorded. |
+| Performance | No workload or gate | No benchmarks; #40 audit filed retrieval, scaling and startup/size gaps. No performance regression verdict is possible. |
+| Escaped regressions | Not systematically recorded | Terminal prompt-to-read echo exposure escaped earlier tests; #34 fixes it and adds an ordering witness. No other escape count is established. |
 
-Dropped: generated temporary-name spelling, descriptor flag and fake-metadata assertions that track implementation details; duplicate path, codec and cleanup checks covered by the wider tests above or existing main tests; mutation selection, shard budgets, CI and qualification receipts because wide mutation runs are paused. The non-UTF-8 filename listing case is unavailable on this macOS filesystem, while non-UTF-8 data-home resolution is covered. The standalone native cache startup candidate remains unported and unverified here; hardware authentication and physical power-loss durability remain unverified.
+**Mutation evidence:** the required contracts named in #37 cover store encryption, authentication and limits; platform identity, bootstrap, atomic publication and cleanup; terminal and CLI handling; and macOS cache admission. The recorded branch-only store selection (required-contract subset, `e8c79312`) reported 45 caught, 0 missed reported, 0 timeouts reported, 6 unviable; the macOS cache/store selection (required-contract subset) reported 69 caught, 0 missed reported, 0 timeouts reported, 29 unviable. Absence of a reported result class is not proof of zero across the full scope. The advisory macOS filesystem run at `35fa554` recorded 102 caught, 65 missed, 6 unviable and 59 unrun; follow-ups classified the 65 as 46 caught and 19 equivalent, and the 59 as 49 caught, 4 equivalent and 6 unviable. Three historical terminal hangs and a Linux terminal-flag equivalence question remain unresolved. A required-contract terminal scenario at `bf3dcd9b` took 45 seconds (0.75 runner-minutes), with 4 caught and 0 missed, timed out or unviable; a required-contract directory-policy scenario took 9 runner-minutes, with 21 caught and 0 missed, timed out or unviable. Runner-minutes for the wider historical scopes and their timeout totals were not recorded; #37 added 0 mutation runner-minutes. The advisory [#30](https://github.com/laputa-systems/vault/pull/30) matrix failed with incomplete and budget-exhausted shards. Wide Vault mutation is paused; branch receipts do not establish a passing main or complete required scope. History retains details (`deslop/cli-oracle:docs/deslop-filesystem.md`, `deslop/signal-failure-tests:docs/deslop-signal-tests.md`, `deslop/platform-ci:docs/deslop-platform-ci.md`). Count the 15 behavior groups protected below, not mutation kills.
 
-Fully superseded stranded branches: none established. Their histories also contain the unported native cache startup candidate, so retain them until it is dispositioned; do not infer safe deletion from these ports alone.
+**Steps and cost.** Ground (#24): added the test entrypoint and boundary inventory; cold test 15.23s, warm 4.43s, lint 9.80s on macOS arm64, six cores, 56 passed and two ignored. Diagnose (#25): no demonstrated defects; filed cross-Mac recovery gap and corrected stale instructions. Types (#26): no strict candidate met the adoption rule; FFI and intentional casts accounted for false positives. Tests (#37–38): exact surplus-name regression and 15 fault-proven groups: filename codec; data home; atomic writes and crash windows; directory trust; private files; locks; staging/listing; bootstrap; identity input; store formats; decrypted limits; Linux ciphertext limits; signal failures; passphrase cleanup; uninitialized store. One injected fault per group failed its focused test. The #37 manual fault cost 62s build plus 0.27s test; no new mutation run. Dead code (#39): compiler checks and cargo-machete found no removable code or dependency. Bench (#40): no representative workload, with three ranked P3 gaps. Findings (#41): rage absence now fails in CI; Linux keyring is an explicit owner-run boundary after container keyctl denial. Other step wall times and CI runner-minutes were not recorded; do not infer them from test counts.
 
-Ground: base `ca93f9dc1f3b2f74ca52915a31b54c324a25af06`; macOS arm64, Rust nightly 1.102.0, `cpu-guard --cores 6`: fresh-target `make test` 15.23s, warm 4.43s, `make lint` 9.80s; all exit 0. Tests: 56 passed, two hardware authentication tests ignored. No vendored source trees found. No performance workload exists; no established user-visible performance gate. No runtime code changed.
+**Method feedback and shared-file gaps.** Prompt publication and reading must share the same hidden terminal session; an operation-order test would have exposed the echo window earlier. The wide mutation matrix exhausted its budget and had incomplete shards, so it cannot certify the critical scope. The dead-code and strict-profile steps found no qualifying cuts or settings. Shared deslop guidance needs a bounded mutation recipe and explicit incomplete-result accounting for platform-specific secret stores; fleet CI rules still report linux-musl-toolchain (3), laputa-rustix (2), binary-release-static (1), make-clean-target (1), owned-tool-support (1) and registry-sources (1). Those shared files are outside this worktree.
 
-PR CI builds Linux musl images and runs `make test-ci`; it has no macOS lane, so macOS and Secure Enclave tests do not run there. Its image does not install rage 0.12.1, so the Linux interoperability test returns early; keyring checks can also return early when the kernel cache is unavailable. Actual CI execution and keyring availability are unverified locally. Open fleet lint findings (linux-musl-toolchain 3, laputa-rustix 2, binary-release-static 1, make-clean-target 1, owned-tool-support 1, registry-sources 1) remain fleet-rule work.
-
-Types: 422 escape-hatch lines before and after (first-party Rust including build.rs). Findings below are distinct diagnostics on macOS arm64 / Linux arm64 musl; duplicate bin/test diagnostics excluded. Real = demonstrated defect; removable = possible escape-hatch deletion; FP = intentional or non-defect. No new setting met the adoption rule; existing profile retained.
-
-| Setting | Findings macOS / Linux | Real | Removable | FP macOS / Linux | Decision |
-| --- | ---: | ---: | ---: | ---: | --- |
-| unsafe_code | 23 / 25 | 0 | 0 | 23 / 25 | Reject: FFI |
-| wildcard_enum_match_arm | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
-| match_wildcard_for_single_variants | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
-| cast_possible_truncation | 5 / 4 | 0 | 0 | 5 / 4 | Reject: bounded or intentional casts |
-| cast_sign_loss | 5 / 5 | 0 | 0 | 5 / 5 | Reject: bounded or intentional casts |
-| unwrap_used | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
-| expect_used | 6 / 6 | 0 | 1 / 1 | 5 / 5 | Reject: too many false positives |
-| redundant_clone | 0 / 0 | 0 | 0 | 0 / 0 | Reject: no witness |
-| needless_pass_by_value | 4 / 3 | 0 | 0 | 4 / 3 | Reject: ownership and callbacks |
-
-Tests (DSLP-4): required scope is `src/store.rs` encryption, authentication and size bounds; `src/macos.rs` and `src/linux.rs` identity and bootstrap validation, atomic publication and cleanup; `src/main.rs` passphrase input, signal restoration, CLI limits and exit statuses; and the macOS cache socket admission and protocol. The ordinary suite exercises age format and tampering, recipient matching, terminal echo and signal restoration, input limits, child status and socket requests. `tests/integration.rs` rejects surplus names before storage. Atomic syscall failures and process-crash windows, bootstrap domain, and signal syscall failures now have witnesses in the landed groups above.
-
-Recorded mutation dispositions are grouped by behavior. The store selection on `e8c79312` records 45 caught and six unviable; the macOS cache/store selection records 69 caught and 29 unviable. These receipts use branch tests and do not establish main's mutation result. The original macOS filesystem run at `35fa554` was incomplete: 102 caught, 65 missed, six unviable, 59 unrun. Follow-up branch tests reconcile the misses as 46 caught and 19 equivalent and the unrun as 49 caught, four equivalent and six unviable. Equivalent groups include disjoint open-flag OR/XOR, redundant filename validation and newline rejection by age parsing. Unviable replacements do not provide evidence. Private temporary-name spelling and incidental diagnostics, including the shard 9 size-display arithmetic, need no further tests. Linux shard 13's surplus-name survivor is covered by the ordinary CLI regression; the terminal-flag OR/XOR survivor remains unresolved pending a Linux-specific equivalence check. Signal setup and restoration failures have branch witnesses; three historical terminal hangs remain incomplete. Exact trials are in `git show deslop/cli-oracle:docs/deslop-filesystem.md`, `git show deslop/signal-failure-tests:docs/deslop-signal-tests.md` and `git show deslop/platform-ci:docs/deslop-platform-ci.md`.
-
-The advisory platform matrix in [draft #30](https://github.com/laputa-systems/vault/pull/30) at `0671858b` passed ordinary macOS and both Linux musl jobs, but the aggregate mutation run failed, including budget-exhausted and incomplete shards. No wide matrix was rerun for this closure. No new mutation trial was run (0 runner-minutes). A hand fault changed `require_exact_name` from `> 1` to `< 1`; the CLI regression failed, and the fault was restored. Cargo reported 62 seconds building and 0.27 seconds running that fault trial. The remaining unrun shards and unconfirmed timeouts are incomplete, not passes. Hardware authentication, live Linux keyring assertions, two-Mac recovery, physical power-loss durability and remote CI remain environment items. DSLP-6: the arm64 CI image ran the pinned rage 0.12.1 interoperability assertions; missing rage fails with CI set and visibly skips locally. The container denied keyctl with `Operation not permitted`, so the named keyring test is an owner-run Linux boundary documented in Verification; CI reports its exclusion.
-
-Local branch inventory against `origin/main` at `553fb720`. Tests listed as worth landing are candidates for separate PRs; their historical receipts do not qualify main.
-
-| Branch | Head | Status | Reason |
-| --- | --- | --- | --- |
-| deslop/acc-socket | 0e72b211 | already merged | Socket fixture is in main. |
-| deslop/atomic-fault-windows | 6856af34 | contains unlanded tests worth landing | `atomic_file_native_fault_windows` exercises syscall failures and process crashes. |
-| deslop/atomic-file-tests | 7db74f65 | contains unlanded tests worth landing | `atomic_file_replacement_and_admission`, `atomic_file_names_and_cleanup` and `atomic_file_temporary_names_flags_and_collisions` protect atomic publication. |
-| deslop/bootstrap-domain-tests | f655ec01 | contains unlanded tests worth landing | `bootstrap_domain_publishes_private_recoverable_store_and_refuses_replacement` and `bootstrap_domain_wrap_failure_cleans_stage_and_preserves_error` protect initialization. |
-| deslop/cli-oracle | 94c2210b | contains unlanded tests worth landing | `cache_daemon_rejects_an_empty_seed` and `cache_daemon_rejects_either_missing_seed_field` protect seed admission; it also inherits crash and terminal witnesses. |
-| deslop/identity-validation-tests | f82546e1 | contains unlanded tests worth landing | `identity_input_identity_bytes` and `identity_input_sidecar_read_and_validation` exercise malformed identity and sidecar input. |
-| deslop/lock-mode-tests | 2c0035b6 | contains unlanded tests worth landing | `lock_mode_descriptor_and_admission` and `lock_mode_directory_and_socket_repair` exercise admission and permissions. |
-| deslop/passphrase-error-tests | c68d9ccd | contains unlanded tests worth landing | `read_passphrase_owned_terminal_cleanup` exercises real PTY cleanup and error propagation. |
-| deslop/passphrase-main | 0e72b211 | already merged | Same head as the merged socket branch. |
-| deslop/platform-ci | e8c79312 | contains unlanded tests worth landing | Inherits `atomic_file_native_fault_windows` and `signal_handler_native_faults`; the advisory matrix is paused. |
-| deslop/signal-contracts | bf3dcd9b | contains unlanded tests worth landing | `read_passphrase_owned_terminal_cleanup` adds terminal I/O fault witnesses. |
-| deslop/signal-failure-tests | e939a06d | contains unlanded tests worth landing | `signal_handler_native_faults` exercises installation and restoration failures. |
-| deslop/staging-list-tests | 9dbf993c | contains unlanded tests worth landing | `staging_list_creation_and_cleanup` and `staging_list_cleanup_refuses_nested_directories` protect cleanup admission. |
-| deslop/tests-close | 553fb720 | superseded by main | At admission its head is identical to main. |
-| deslop/tests-qualification | 63b25c74 | contains unlanded tests worth landing | Inherits `atomic_file_native_fault_windows` and records native coverage limits. |
+**Open boundaries.** DSLP-7 (P3) requires two Macs for cross-Mac recovery. DSLP-8 (P3) retains the native cache startup test and stranded branches. DSLP-9–11 (P3) cover performance evidence. Secure Enclave authentication and same-Mac hardware recovery require hardware and remain ignored by default; Linux session-keyring assertions require a host with a usable keyring and readable `/proc/keys`, since the container denies keyctl. Physical power-loss durability is not proved by process-crash tests. Non-UTF-8 filename listing is unavailable on this macOS filesystem. These are unverified boundaries, not demonstrated failures.
 
 ## Tickets
 
