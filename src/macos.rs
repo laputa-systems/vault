@@ -1666,6 +1666,38 @@ mod tests {
     }
 
     #[test]
+    fn private_file_reads_and_repairs_owned_files() {
+        use super::read_private_file;
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("value"), b"abcd").unwrap();
+        fs::set_permissions(fixture.path().join("value"), fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 4).unwrap(), b"abcd");
+        assert_eq!(fs::metadata(fixture.path().join("value")).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap_err(), "vault: value exceeds the maximum file size");
+        fs::write(fixture.path().join("empty"), b"").unwrap();
+        assert_eq!(read_private_file(&dir, "empty", 0).unwrap(), b"");
+        assert_eq!(read_private_file(&dir, "missing", 4).unwrap_err(), "vault: missing: not found");
+    }
+
+    #[test]
+    fn private_file_rejects_links_and_nonregular_files() {
+        use super::{io_error, read_private_file};
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        fs::write(fixture.path().join("value"), b"yes").unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap(), b"yes");
+        std::os::unix::fs::symlink("value", fixture.path().join("link")).unwrap();
+        assert_eq!(read_private_file(&dir, "link", 3).unwrap_err(), io_error("open link", rustix::io::Errno::LOOP));
+        fs::hard_link(fixture.path().join("value"), fixture.path().join("hard")).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap_err(), "vault: value has an unexpected hard link");
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        assert_eq!(read_private_file(&dir, "value", 3).unwrap(), b"yes");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        assert_eq!(read_private_file(&dir, "directory", 3).unwrap_err(), "vault: directory is not a regular file");
+    }
+
+    #[test]
     fn application_support_path_uses_xdg_or_macos_default() {
         let cases = [
             (
