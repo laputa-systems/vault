@@ -5,6 +5,11 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+Dead code (DSLP-5): Rust nightly 1.102.0, all targets on macOS arm64 and Linux arm64 container, default features: `dead_code` and `unreachable_pub` found two unreachable public test helpers, `open_pty` and `launch_binary_with_controlling_tty`; their visibility is now crate-only. `open_pty` is called by `tests/terminal_cli.rs` and macOS `src/main.rs` tests. The launch helper is called by the latter; its single `allow(dead_code)` remains necessary because the terminal integration target imports the same file without calling that helper. Linux test-only `get_secrets_at` is used by storage tests; `identity_cache_timeout` and `parse_key_timeout` serve the keyring expiry test; `KEYCTL_DESCRIBE` serves its permission check. The test-only Secure Enclave `Interaction::Disallowed` is used by the ignored hardware test. Other test helpers are reached by their test targets. The macOS `initialize_store_with` seam is used by production initialization and bootstrap tests. No dead code or dependencies were removed; cargo-machete 0.10.1 found no unused dependencies. No compiler findings remain unsuppressed.
+
+Debloat review: the CLI dispatch reaches the platform storage modules; age and filesystem layers protect the documented store, cache and recovery contracts, while PTY and fault helpers exercise terminal and failure behavior. No behavior-preserving structural cut or owner walk-back was established within this scope. CI was outside scope. No CLI, store, protocol or recovery behavior changed; macOS tests and lint and both platform checks verify the visibility-only change. Hardware authentication, cross-Mac recovery and a live Linux keyring remain unverified by this pass.
+
+
 **Branch tests landed**
 
 Each fault below was injected into production code, produced a failing focused test (exit 101), and was reverted.
@@ -81,14 +86,6 @@ Local branch inventory against `origin/main` at `553fb720`. Tests listed as wort
 
 
 
-### DSLP-5 · P2 · Dead code: tools and debloat
-
-- **Area:** deslop · dead code
-- **Where:** whole repository
-- **Problem:** No dead-code scan has run.
-- **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
-- **Fix with:** deslop
-- **Effort:** M
 
 
 ### DSLP-6 · P2 · Interoperability and keyring tests pass silently when their tool is missing
