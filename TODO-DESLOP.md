@@ -1,10 +1,9 @@
 Prefix: DSLP
-Next: 8
+Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier A). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
-
 
 **Branch tests landed**
 
@@ -110,4 +109,14 @@ Local branch inventory against `origin/main` at `553fb720`. Tests listed as wort
 - **Recommendation:** Add a documented, repeatable two-Mac recovery boundary check using a disposable store, verifying recovery and readback after transfer, plus rejection of a wrong passphrase. Include src/macos.rs, src/secure_enclave.rs and src/store.rs in the critical mutation scope.
 - **Fix with:** test-audit
 - **Effort:** M
+
+
+### DSLP-8 · P3 · Port the native cache startup test from the stranded branches
+
+- **Area:** deslop · tests
+- **Where:** deslop/platform-ci tests/cache_spawn.rs; Cargo.toml test targets
+- **Problem:** The stranded branches carry a native cache startup test that needs its own Cargo test target; it was not ported when the other branch tests landed, so cache spawn and startup on macOS have no witness on main.
+- **Recommendation:** Port the test with its Cargo test target, prove it with one injected startup fault, then delete the stranded deslop branches.
+- **Fix with:** deslop
+- **Effort:** S
 
