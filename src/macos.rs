@@ -1698,6 +1698,30 @@ mod tests {
     }
 
     #[test]
+    fn identity_input_identity_bytes() {
+        use zeroize::Zeroizing;
+        const IDENTITY: &str = "AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33";
+        let parsed = super::identity_from_bytes(Zeroizing::new(IDENTITY.as_bytes().to_vec())).unwrap();
+        assert_eq!(parsed.to_string().expose_secret(), IDENTITY);
+        for bytes in [b"malformed".to_vec(), vec![0xff], format!("{IDENTITY}\r").into_bytes(), format!("{IDENTITY}\n").into_bytes(), format!("{IDENTITY}\r\n").into_bytes()] {
+            assert_eq!(super::identity_from_bytes(Zeroizing::new(bytes)).err().unwrap(), "vault: Secure Enclave returned an invalid age identity");
+        }
+    }
+
+    #[test]
+    fn identity_input_sidecar_read_and_validation() {
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: cannot read Secure Enclave identity: vault: identity.se: not found");
+        let path = fixture.path().join(SECURE_ENCLAVE_NAME);
+        let sidecar = framed_sidecar();
+        fs::write(&path, &sidecar).unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap(), sidecar);
+        fs::write(&path, b"bad header").unwrap();
+        assert_eq!(super::read_secure_enclave_sidecar(&dir).unwrap_err(), "vault: Secure Enclave sidecar is corrupt: unsupported or truncated Secure Enclave sidecar");
+    }
+
+    #[test]
     fn application_support_path_uses_xdg_or_macos_default() {
         let cases = [
             (
