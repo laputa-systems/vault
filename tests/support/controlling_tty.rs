@@ -19,7 +19,7 @@ unsafe extern "C" {
 }
 
 
-pub fn open_pty() -> io::Result<(File, File)> {
+pub(crate) fn open_pty() -> io::Result<(File, File)> {
     let mut master = -1;
     let mut slave = -1;
     let result = unsafe {
@@ -48,7 +48,7 @@ pub fn open_pty() -> io::Result<(File, File)> {
 
 
 #[allow(dead_code)]
-pub fn launch_binary_with_controlling_tty(
+pub(crate) fn launch_binary_with_controlling_tty(
     executable: &std::ffi::OsStr, slave: &File, data_home: &std::path::Path,
     args: &[&str], environment: &[(&str, &str)], stdin: Stdio,
 ) -> io::Result<Child> {
