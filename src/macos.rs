@@ -1417,6 +1417,157 @@ mod tests {
     }
 
     #[test]
+    fn atomic_file_native_fault_windows() {
+        use super::io_error;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::{Child, Command};
+        use std::time::{Duration, Instant};
+
+        struct OwnedChild(Child, bool);
+        impl OwnedChild {
+            fn kill_group(&self) {
+                let pid = rustix::process::Pid::from_raw(i32::try_from(self.0.id()).unwrap()).unwrap();
+                assert_ne!(pid.as_raw_pid(), 1);
+                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL).unwrap();
+            }
+        }
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                if !self.1 {
+                    let pid = rustix::process::Pid::from_raw(i32::try_from(self.0.id()).unwrap()).unwrap();
+                    if pid.as_raw_pid() != 1 { let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL); }
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        fn wait(child: &mut OwnedChild) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() { child.1 = true; return status; }
+                assert!(Instant::now() < deadline, "owned process exceeded five seconds");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        const ROOT: &str = "VAULT_ATOMIC_ROOT";
+        const MODE: &str = "VAULT_ATOMIC_MODE";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = PathBuf::from(root);
+            let mode = std::env::var(MODE).unwrap();
+            fs::write(root.join(".bootstrap"), b"ready").unwrap();
+            let dir = fs::File::open(&root).unwrap();
+            let result = super::atomic_write(&dir, "recipient", b"new-value");
+            let io = rustix::io::Errno::IO;
+            match mode.as_str() {
+                "control" => assert_eq!(result, Ok(())),
+                "write" => assert_eq!(result.unwrap_err(), io_error("write recipient", io)),
+                "file-sync" => assert_eq!(result.unwrap_err(), io_error("sync recipient", io)),
+                "rename" => assert_eq!(result.unwrap_err(), io_error("replace recipient", io)),
+                "dir-sync" => assert_eq!(result.unwrap_err(), io_error("sync containing directory", io)),
+                "cleanup" => assert_eq!(result.unwrap_err(), format!("{}; temporary file cleanup failed: {}", io_error("write recipient", io), rustix::io::Errno::ACCESS)),
+                _ => panic!("unexpected completion for {mode}"),
+            }
+            fs::write(root.join(".complete"), b"done").unwrap();
+            return;
+        }
+        let scratch = TestDir::new();
+        let library = scratch.path().join("atomic_fault.dylib");
+        let mut compiler = OwnedChild(Command::new("cc")
+            .args(["-dynamiclib", "-Wall", "-Wextra", "-Werror"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/atomic_fault.c"))
+            .arg("-o").arg(&library).process_group(0).spawn().unwrap(), false);
+        assert!(wait(&mut compiler).success(), "compile fault library");
+        for (mode, event, expected) in [
+            ("control", "", b"new-value".as_slice()),
+            ("write", "W", b"old-value".as_slice()),
+            ("file-sync", "F", b"old-value".as_slice()),
+            ("rename", "R", b"old-value".as_slice()),
+            ("dir-sync", "D", b"new-value".as_slice()),
+            ("cleanup", "WU", b"old-value".as_slice()),
+            ("kill-file", "S", b"old-value".as_slice()),
+            ("kill-rename", "N", b"new-value".as_slice()),
+        ] {
+            let root = scratch.path().join(mode);
+            fs::create_dir(&root).unwrap();
+            let root = fs::canonicalize(root).unwrap();
+            fs::write(root.join("recipient"), b"old-value").unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "macos::tests::atomic_file_native_fault_windows"])
+                .env(ROOT, &root).env(MODE, mode).process_group(0);
+            if mode == "control" { command.env_remove("DYLD_INSERT_LIBRARIES"); }
+            else { command.env("DYLD_INSERT_LIBRARIES", &library); }
+            let mut child = OwnedChild(command.spawn().unwrap(), false);
+            if mode.starts_with("kill-") {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while fs::read(root.join(".event")).ok().as_deref() != Some(event.as_bytes()) {
+                    if let Some(status) = child.0.try_wait().unwrap() {
+                        child.1 = true;
+                        panic!("{mode}: child exited before event: {status}");
+                    }
+                    assert!(Instant::now() < deadline, "{mode}: missing injected event");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                child.kill_group();
+                assert_eq!(wait(&mut child).signal(), Some(9));
+            } else {
+                assert!(wait(&mut child).success(), "{mode}: child failed");
+                assert_eq!(fs::read(root.join(".complete")).unwrap(), b"done");
+            }
+            assert_eq!(fs::read(root.join(".bootstrap")).unwrap(), b"ready", "{mode}");
+            if !event.is_empty() { assert_eq!(fs::read(root.join(".event")).unwrap(), event.as_bytes(), "{mode}"); }
+            assert_eq!(fs::read(root.join("recipient")).unwrap(), expected, "{mode}");
+            let mut names: Vec<_> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+            names.sort();
+            let temps: Vec<_> = names.iter().filter(|n| n.starts_with(".tmp-")).cloned().collect();
+            assert_eq!(temps.len(), usize::from(mode == "cleanup" || mode == "kill-file"), "{mode}: {names:?}");
+            if let Some(temp) = temps.first() {
+                assert_eq!(fs::read(root.join(temp)).unwrap(), if mode == "cleanup" { b"".as_slice() } else { b"new-value".as_slice() });
+            }
+            let mut expected_names = vec![".bootstrap".to_string(), "recipient".to_string()];
+            if !event.is_empty() { expected_names.push(".event".to_string()); }
+            if !mode.starts_with("kill-") { expected_names.push(".complete".to_string()); }
+            expected_names.extend(temps);
+            expected_names.sort();
+            assert_eq!(names, expected_names, "{mode}");
+            if mode.starts_with("kill-") {
+                let dir = fs::File::open(&root).unwrap();
+                super::atomic_write(&dir, "recipient", b"new-value").unwrap();
+                assert_eq!(fs::read(root.join("recipient")).unwrap(), b"new-value");
+                let mut after: Vec<_> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+                after.sort();
+                assert_eq!(after, names, "{mode}: retry changed residue");
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_file_replacement_and_admission() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let fixture = TestDir::new();
+        let dir = fs::File::open(fixture.path()).unwrap();
+        let path = fixture.path().join("recipient");
+        super::atomic_write(&dir, "recipient", b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        super::atomic_write(&dir, "recipient", b"replacement").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+        fs::hard_link(&path, fixture.path().join("hard")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "recipient", b"bad").unwrap_err(), "vault: recipient has an unexpected hard link");
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&path).unwrap().ino(), fs::metadata(fixture.path().join("hard")).unwrap().ino());
+        fs::remove_file(fixture.path().join("hard")).unwrap();
+        symlink("recipient", fixture.path().join("link")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "link", b"bad").unwrap_err(), "vault: link is not a regular file");
+        assert_eq!(fs::read_link(fixture.path().join("link")).unwrap(), std::path::Path::new("recipient"));
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        fs::create_dir(fixture.path().join("directory")).unwrap();
+        assert_eq!(super::atomic_write(&dir, "directory", b"bad").unwrap_err(), "vault: directory is not a regular file");
+        assert_eq!(fs::read_dir(fixture.path().join("directory")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 3);
+    }
+
+    #[test]
     fn application_support_path_uses_xdg_or_macos_default() {
         let cases = [
             (
