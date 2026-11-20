@@ -21,7 +21,7 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 - Secure Enclave sidecar and ABI: `src/secure_enclave.rs` tests; hardware authentication test ignored by default. Same-Mac recovery roundtrip is ignored by default; cross-Mac recovery: none.
 - macOS cache socket protocol: `src/macos.rs` identity cache tests. Linux session keyring assertions are an owner-run boundary: run `CI=true cargo test identity_cache_permissions_expiry_refresh_and_revocation_are_enforced -- --nocapture` on a Linux host with a usable session keyring and readable `/proc/keys`. The CI container returns `Operation not permitted` for keyctl, so `make test-ci` names and excludes that test; cache-scope assertions in `cache_clear_is_store_scoped_and_recipient_replacement_does_not_hide_stale_cache` also skip when unavailable.
 - Public library API and network endpoints: none; this is a CLI.
-- Performance workload: none; no benchmark or established user-visible performance gate exists. Ranked gaps: [TODO-DESLOP.md](TODO-DESLOP.md#report).
+- Performance workload: none; no benchmark or established user-visible performance gate exists. Ranked gaps are tickets in [TODO.md](TODO.md).
 
 ## Invariants
 
