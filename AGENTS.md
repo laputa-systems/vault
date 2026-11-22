@@ -12,6 +12,8 @@ macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
 ## Verification
 
+`make clean` removes the checkout’s ordinary `./target` directory. It refuses a file or symlink at that path.
+
 - `cpu-guard --cores 6 -- make test`: macOS arm64 cold 15.23s, warm 4.43s; two Secure Enclave authentication tests ignored.
 - `cpu-guard --cores 6 -- make lint`: macOS arm64 9.80s after test build.
 - CLI usage, arguments, exec environment, output and child exit status: `tests/integration.rs`; terminal input, echo and signals: `tests/terminal_cli.rs` and `src/main.rs` tests.
