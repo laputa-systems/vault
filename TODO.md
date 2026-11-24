@@ -1,5 +1,5 @@
 Prefix: VLT
-Next: 8
+Next: 9
 
 # Backlog: vault
 
@@ -15,10 +15,10 @@ Next: 8
 ### VLT-4 · P3 · Port the native cache startup test from the stranded branches
 
 - **Area:** tests
-- **Where:** deslop/platform-ci tests/cache_spawn.rs; Cargo.toml test targets
+- **Where:** commit 7d88e51a:tests/cache_spawn.rs; Cargo.toml test targets
 - **Problem:** The stranded branches carry a native cache startup test that needs its own Cargo test target; it was not ported when the other branch tests landed, so cache spawn and startup on macOS have no witness on main.
-- **Recommendation:** Port the test with its Cargo test target, prove it with one injected startup fault, then delete the stranded deslop branches.
-- **Fix with:** deslop
+- **Recommendation:** Port the test with its Cargo test target, prove it with one injected startup fault, then delete the stranded branches.
+- **Fix with:** none
 - **Effort:** S
 
 ### VLT-5 · P3 · Secret retrieval latency has no representative measurement
@@ -42,9 +42,18 @@ Next: 8
 ### VLT-7 · P3 · CLI startup and distribution size have no ongoing performance comparison
 
 - **Area:** Performance · startup
-- **Where:** Makefile:23, Cargo.toml:26, docs/deslop-terminal-echo.md:44
+- **Where:** Makefile:23, Cargo.toml:26
 - **Problem:** Unproven regression risk: a one-off release-profile size comparison is not an ongoing distribution-size or startup measurement, so changes can increase download footprint or delay every invocation unnoticed.
 - **Recommendation:** Record distribution binary size and verified CLI startup latency for representative release builds on supported platforms, with host and baseline and interleaved timing; use process-level CPU sampling if startup regresses.
 - **Fix with:** bench-pyramid
+- **Effort:** S
+
+### VLT-8 · P3 · Linux keyring cache assertions lack host qualification
+
+- **Area:** Linux cache testing
+- **Where:** src/linux.rs:1336, src/linux.rs:1462, AGENTS.md verification
+- **Problem:** The container kernel denies keyring access, so permission, expiry, refresh, revocation and cache-scope assertions were not exercised there; a regression could remain undetected.
+- **Recommendation:** On a Linux host with a usable session keyring and readable /proc/keys, run the documented owner boundary test and verify the cache-scope assertions execute.
+- **Fix with:** none
 - **Effort:** S
 
