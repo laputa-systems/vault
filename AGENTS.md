@@ -2,6 +2,8 @@
 
 macOS and Linux secret manager. [README.md](README.md) is the user guide.
 
+The roadmap, [docs/roadmap.md](docs/roadmap.md), holds all current and future work; its Status is the resume point.
+
 ## Commands
 
 - Build: `cargo build`
