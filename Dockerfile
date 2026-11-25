@@ -2,6 +2,8 @@
 # Toolchain bump: edit rust-toolchain.toml only; this image reads the channel
 # from it. Bump LLVM_* and RUSTUP_VERSION (plus its checksums) separately.
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+COPY --from=oci.17166969.xyz/owned-tools@sha256:1a5d1306bb105f21b60c67bbf04677a92048c02a808ae9b29dfdac1a90f2f073 /opt/laputa /opt/laputa
+ENV PATH=/opt/laputa/bin:$PATH
 
 ARG TARGETARCH
 ARG LLVM_VERSION=23.1.5
@@ -21,11 +23,9 @@ RUN apk add --no-cache \
     file=5.47-r2 \
     gcc=15.2.0-r5 \
     make=4.4.1-r4 \
-    mold=2.39.1-r0 \
     strace=6.19-r1 \
     musl-dev=1.2.6-r3 \
     libgcc=15.2.0-r5 \
-    git=2.54.1-r0 \
     tzdata=2026f-r0
 
 # Tests link libutil for Unix PTY support (openpty); musl provides those
