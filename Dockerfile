@@ -15,18 +15,21 @@ ARG RUSTUP_VERSION=1.29.3
 ARG RUSTUP_X86_64_SHA256=1552169aba2836777136ccff7a381e95c17233b5d8250cd5e10ae3cb971bfcfc
 ARG RUSTUP_AARCH64_SHA256=956deacdc27ab82ae7ac821d5d3e9e95e4795d476d17efe99743bb8531ca1031
 
-# gcc provides the cc default linker used by vault's plain-cargo Makefile flow;
-# mold is required because the Makefile passes -fuse-ld=mold for musl targets.
+# mold comes from the owned-tools tree because the Makefile passes -fuse-ld=mold for musl targets.
 RUN apk add --no-cache \
     binutils=2.45.1-r1 \
     bash=5.3.9-r1 \
     file=5.47-r2 \
-    gcc=15.2.0-r5 \
     make=4.4.1-r4 \
     strace=6.19-r1 \
     musl-dev=1.2.6-r3 \
     libgcc=15.2.0-r5 \
     tzdata=2026f-r0
+
+# Rust links host proc-macros against -lgcc_s, which only gcc's package symlinks; the C
+# compiler and linker driver is the owned clang.
+RUN ln -s libgcc_s.so.1 /usr/lib/libgcc_s.so \
+    && ln -s /opt/laputa/bin/clang /usr/local/bin/cc
 
 # Tests link libutil for Unix PTY support (openpty); musl provides those
 # symbols in libc, so an empty archive satisfies the legacy library name
